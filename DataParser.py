@@ -1,36 +1,40 @@
-import matplotlib.pyplot as plt
 import pandas as pd
+import glob
+import numpy as np
+from pandas import DataFrame
 
-# Display all columns side by side
-pd.set_option('expand_frame_repr', False)
 
-df = pd.read_csv('Dataset/20250205_082609_HIST_006_CPXE_1.csv')
-print(df.head())
+def clean_df(df_input: pd.DataFrame) -> DataFrame | None:
+    df_input["forceZ"] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
+    df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 
-# Create figure and primary axis (for Fz)
-fig, ax1 = plt.subplots()
+    if len(df_input) == 0:
+        return None
 
-# Plot 'Fz' values with smaller markers
-df.plot(x='CPXEts', y='Fz', color='blue', label='Not Touching', ax=ax1)
-touching_rows = df[df['isTouching_SMAC'] == 1]
-arrived_rows = df[df['isArrived_Festo'] == 1]
+    new_df = pd.DataFrame({
+        "posx": df_input['posx'] + df_input['posx_d'] / 1000,
+        "posy": df_input['posy'] + df_input['posy_d'] / 1000,
+        "posz": df_input['posz'] + df_input['posz2'] / 200 + df_input['posz_d'] / 1000,
+        "Fz": df_input['forceZ'],
+        "t": df_input['CPXEts'],
+        "isTouching_SMAC": df_input['isTouching_SMAC'],
+        "isArrived_Festo": df_input['isArrived_Festo'],
+    })
 
-arrived_rows.plot(x='CPXEts', y='Fz', color='green', label='Arrived', ax=ax1)
-touching_rows.plot(x='CPXEts', y='Fz', color='red', label='Touching', ax=ax1)
+    return new_df
 
-# Create a secondary y-axis for 'Position'
-ax2 = ax1.twinx()  # Create a second y-axis sharing the same x-axis
+# Return only the signal captured when the machine is touching
+def get_df_list(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> list[pd.DataFrame]:
+    # Get list of all CSV files
+    csv_files = glob.glob(path)
 
-df.plot(x='CPXEts', y='posz2', color='purple', linestyle='dashed', label='Position', ax=ax2)
+    df_list = list()
+    for file in csv_files:
+        data_frame = pd.read_csv(file)
+        df_clean = clean_df(data_frame)
+        df_clean = df_clean[df_clean['isTouching_SMAC'] == 1].copy()
 
-# Labels and legends
-ax1.set_xlabel('CPXEts')
-ax1.set_ylabel('Fz (Force)', color='blue')
-ax2.set_ylabel('Position', color='purple')
+        if df_clean is not None and len(df_clean) > 0:
+            df_list.append(df_clean)
 
-# Adjust legend
-ax1.legend(loc='upper left')
-ax2.legend(loc='upper right')
-
-plt.title('Fz and Position over Time')
-plt.show()
+    return df_list
