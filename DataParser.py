@@ -33,9 +33,16 @@ def get_df_list(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> li
     for file in csv_files:
         data_frame = pd.read_csv(file)
         df_clean = clean_df(data_frame)
+
+        mean = np.array(df_clean[df_clean['isArrived_Festo'] == 1]["Fz"])[:50].mean()   # initial offset
+        df_clean["Fz"] = df_clean["Fz"] - mean
+
         df_clean = df_clean[df_clean['isTouching_SMAC'] == 1].copy()
+        df_clean["t"] = df_clean["t"] - df_clean['t'].min()
 
         if df_clean is not None and len(df_clean) > 0:
             df_list.append(df_clean)
 
     return df_list
+
+
