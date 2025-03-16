@@ -9,8 +9,8 @@ def create_input_signals(df_list: list[pd.DataFrame]) -> np.ndarray:
     for df in df_list:
         signal = np.column_stack((df['posz'], df['Fz']))
 
-        if signal.shape != (702, 2):
-            print(signal.shape)
+        # if signal.shape != (702, 2):
+        #     print(signal.shape)
 
             # Append this signal to the list of input signals
         input_signals.append(signal)

@@ -25,10 +25,10 @@ def cubic_interpolation_padded(list_dataframes: list[pd.DataFrame], period: floa
 def pad_time_series(dataframes: list[pd.DataFrame]) -> list[pd.DataFrame]:
     # max_length = max(len(df) for df in dataframes)  # Find longest series
     lengths = sorted(set(len(df) for df in dataframes), reverse=True)  # Get unique lengths in descending order
-    second_max_length = lengths[1] if len(lengths) > 1 else None  # Get second maximum if available
+    second_max_length = lengths[1] if len(lengths) > 1 else None  # Get third maximum if available
 
     padded_dfs = []
-    for df in dataframes:
+    for i, df in enumerate(dataframes):
         pad_size = second_max_length - len(df)
 
         if pad_size > 0:  # If this series is shorter, pad it
@@ -37,5 +37,7 @@ def pad_time_series(dataframes: list[pd.DataFrame]) -> list[pd.DataFrame]:
             df = pd.concat([df, pad_df], ignore_index=True)  # Append padding
 
             padded_dfs.append(df)
+        else:
+            print(i)
 
     return padded_dfs

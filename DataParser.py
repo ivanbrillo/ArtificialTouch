@@ -34,7 +34,7 @@ def get_df_list(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> li
         data_frame = pd.read_csv(file)
         df_clean = clean_df(data_frame)
 
-        mean = np.array(df_clean[df_clean['isArrived_Festo'] == 1]["Fz"])[:50].mean()   # initial offset
+        mean = np.array(df_clean[df_clean['isArrived_Festo'] == 1]["Fz"])[:50].mean()  # initial offset
         df_clean["Fz"] = df_clean["Fz"] - mean
 
         df_clean = df_clean[df_clean['isTouching_SMAC'] == 1].copy()
@@ -46,3 +46,24 @@ def get_df_list(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> li
     return df_list
 
 
+def get_df_list2(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> list[pd.DataFrame]:
+    # Get list of all CSV files
+    csv_files = glob.glob(path)
+
+    df_list = list()
+    for file in csv_files:
+        data_frame = pd.read_csv(file)
+        df_clean = clean_df(data_frame)
+
+        mean = np.array(df_clean[df_clean['isArrived_Festo'] == 1]["Fz"])[:50].mean()  # initial offset
+        df_clean["Fz"] = df_clean["Fz"] - mean
+
+        df_clean = df_clean[df_clean['isArrived_Festo'] == 1].copy()
+        df_clean["t"] = df_clean["t"] - df_clean['t'].min()
+
+        df_clean2 = df_clean[df_clean['isTouching_SMAC'] == 1].copy()
+
+        if df_clean2 is not None and len(df_clean2) > 0:
+            df_list.append(df_clean)
+
+    return df_list
