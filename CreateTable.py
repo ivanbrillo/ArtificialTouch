@@ -150,10 +150,10 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
     df_input['forceZ'] = (df_input['forceZ'] - offset) #/ np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
     df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 
-    posx = np.mean(df_input['posx'][df_input['isArrived_Festo'] == 1] + df_input['posx_d'][
-        df_input['isArrived_Festo'] == 1] / 1000)
-    posy = np.mean(df_input['posy'][df_input['isArrived_Festo'] == 1] + df_input['posy_d'][
-        df_input['isArrived_Festo'] == 1] / 1000)
+    posx = np.round(np.mean(df_input['posx'][df_input['isArrived_Festo'] == 1] + df_input['posx_d'][
+        df_input['isArrived_Festo'] == 1] / 1000))
+    posy = np.round(np.mean(df_input['posy'][df_input['isArrived_Festo'] == 1] + df_input['posy_d'][
+        df_input['isArrived_Festo'] == 1] / 1000))
 
     if posx < 20 and posy < 20:
         return None
