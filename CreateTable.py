@@ -7,7 +7,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
 from scipy.signal import welch
 from scipy.interpolate import interp1d
-
+from scipy.stats import skew, kurtosis
 
 def extract_features(data):
     # Gaussian Smoothing
@@ -127,6 +127,165 @@ def extract_features(data):
             force_oscillation, force_relaxation, stiffness_ratio)
 
 
+
+def extract_curve_features(position, force):
+    features = {}
+
+    # --- 1. Peak detection ---
+    peak_idx = np.argmax(force)
+    features['peak_position'] = position[peak_idx]
+
+    # --- 2. Hysteresis area ---
+    # Ensure the curve is closed (append first point if necessary)
+    if not np.array_equal(position[0], position[-1]) or not np.array_equal(force[0], force[-1]):
+        position_closed = np.append(position, position[0])
+        force_closed = np.append(force, force[0])
+    else:
+        position_closed = position
+        force_closed = force
+    features['hysteresis_area'] = 0.5 * abs(np.sum(
+        position_closed[:-1] * force_closed[1:] - position_closed[1:] * force_closed[:-1]
+    ))
+
+    # --- 3. Loading energy (area under loading curve) ---
+    features['loading_energy'] = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
+
+    # --- 4. Loading nonlinearity ---
+    if peak_idx > 10:
+        try:
+            quad_fit = np.polyfit(position[:peak_idx + 1], force[:peak_idx + 1], 2)
+            features['loading_nonlinearity'] = abs(quad_fit[0])
+        except Exception:
+            features['loading_nonlinearity'] = np.nan
+    else:
+        features['loading_nonlinearity'] = np.nan
+
+    # --- 5. Loading-to-unloading area ratio ---
+    if peak_idx > 10 and peak_idx < len(position) - 10:
+        loading_area = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
+        unloading_area = np.trapz(force[peak_idx:], position[peak_idx:])
+        features['loading_unloading_area_ratio'] = loading_area / abs(unloading_area) if unloading_area != 0 else np.nan
+    else:
+        features['loading_unloading_area_ratio'] = np.nan
+
+    # --- 6. Force ratio (75% displacement / 25% displacement) ---
+    if peak_idx > 5:
+        peak_pos = position[peak_idx]
+        idx_25 = np.argmin(np.abs(position[:peak_idx + 1] - 0.25 * peak_pos))
+        idx_75 = np.argmin(np.abs(position[:peak_idx + 1] - 0.75 * peak_pos))
+        f25 = force[idx_25]
+        f75 = force[idx_75]
+        features['force_ratio_75_25'] = f75 / f25 if f25 != 0 else np.nan
+    else:
+        features['force_ratio_75_25'] = np.nan
+
+    # --- 7. Loading skewness and kurtosis ---
+    if peak_idx > 5:
+        features['loading_skewness'] = skew(force[:peak_idx + 1])
+        features['loading_kurtosis'] = kurtosis(force[:peak_idx + 1])
+    else:
+        features['loading_skewness'] = np.nan
+        features['loading_kurtosis'] = np.nan
+
+    # --- 8. Polynomial curve fits ---
+    if peak_idx > 15:
+        x_load = position[:peak_idx + 1]
+        y_load = force[:peak_idx + 1]
+        x_norm = (x_load - np.min(x_load)) / (np.ptp(x_load) if np.ptp(x_load) != 0 else 1)
+        y_norm = y_load / np.max(y_load) if np.max(y_load) != 0 else y_load
+
+        for degree in [3, 4, 5]:
+            try:
+                poly_fit = np.polyfit(x_norm, y_norm, degree)
+                for i, coef in enumerate(poly_fit):
+                    features[f'poly{degree}_coef{i}'] = coef
+            except Exception:
+                for i in range(degree + 1):
+                    features[f'poly{degree}_coef{i}'] = np.nan
+
+        try:
+            cubic_fit = np.polyfit(x_load, y_load, 3)
+            features['cubic_coefficient'] = cubic_fit[0]
+        except Exception:
+            features['cubic_coefficient'] = np.nan
+        try:
+            quartic_fit = np.polyfit(x_load, y_load, 4)
+            features['quartic_coefficient'] = quartic_fit[0]
+        except Exception:
+            features['quartic_coefficient'] = np.nan
+    else:
+        for degree in [3, 4, 5]:
+            for i in range(degree + 1):
+                features[f'poly{degree}_coef{i}'] = np.nan
+        features['cubic_coefficient'] = np.nan
+        features['quartic_coefficient'] = np.nan
+
+    # --- 9. Segmentation features (only segments 2 and 3) ---
+    if peak_idx > 15:
+        num_segments = 4
+        segment_size = (peak_idx + 1) // num_segments
+        for seg in [2, 3]:
+            start = seg * segment_size
+            end = (seg + 1) * segment_size if seg < num_segments - 1 else peak_idx + 1
+            if end - start > 5:
+                seg_pos = position[start:end]
+                seg_force = force[start:end]
+                slope = (seg_force[-1] - seg_force[0]) / (seg_pos[-1] - seg_pos[0]) if (seg_pos[-1] - seg_pos[
+                    0]) != 0 else np.nan
+                std = np.std(seg_force)
+                seg_skew = skew(seg_force) if len(seg_force) > 3 else np.nan
+            else:
+                slope = np.nan
+                std = np.nan
+                seg_skew = np.nan
+            features[f'segment{seg}_slope'] = slope
+            features[f'segment{seg}_force_std'] = std
+            features[f'segment{seg}_skew'] = seg_skew
+    else:
+        for seg in [2, 3]:
+            features[f'segment{seg}_slope'] = np.nan
+            features[f'segment{seg}_force_std'] = np.nan
+            features[f'segment{seg}_skew'] = np.nan
+
+    return features
+
+
+def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', threshold=0.1):
+    """
+    Given a DataFrame (with force and position data stored as arrays/lists in each row),
+    compute the hysteresis features using extract_curve_features() and add them as new columns.
+    """
+    # List of hysteresis features (update if additional features are added in extract_curve_features)
+    hysteresis_features = [
+        'peak_position', 'hysteresis_area', 'loading_energy', 'loading_nonlinearity',
+        'loading_unloading_area_ratio', 'force_ratio_75_25', 'loading_skewness',
+        'loading_kurtosis', 'poly3_coef0', 'poly3_coef1', 'poly3_coef2', 'poly3_coef3',
+        'poly4_coef0', 'poly4_coef1', 'poly4_coef2', 'poly4_coef3', 'poly4_coef4',
+        'poly5_coef0', 'poly5_coef1', 'poly5_coef2', 'poly5_coef3', 'poly5_coef4',
+        'segment2_slope', 'segment3_slope', 'segment2_force_std', 'segment3_force_std',
+        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient'
+    ]
+
+    # Initialize the hysteresis feature columns if they don't exist
+    for feat in hysteresis_features:
+        if feat not in df.columns:
+            df[feat] = np.nan
+
+    # Loop through each row and compute the features
+    for idx, row in df.iterrows():
+        force = np.array(row[force_column])
+        position = np.array(row[pos_column])
+        # Align position so that the first force value above the threshold is at zero
+        force_above_threshold = force > threshold
+        if np.any(force_above_threshold):
+            start_idx = np.where(force_above_threshold)[0][0]
+            aligned_position = position - position[start_idx]
+            feats = extract_curve_features(aligned_position, force)
+            for key, value in feats.items():
+                df.at[idx, key] = value
+    return df
+
+
 def find_inclusions(json_data):
     circles = json_data["Inclusions"]
     c = [(circle["Position"][0] + 50, circle["Position"][1] + 50) for circle in circles]
@@ -200,6 +359,7 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
         "label": label
     })
 
+    new_df = compute_hysteresis_features_for_df(new_df, force_column='Fi', pos_column='Pi')
     return new_df
 
 
