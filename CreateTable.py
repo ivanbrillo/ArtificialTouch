@@ -8,6 +8,7 @@ from scipy.stats import linregress
 from scipy.signal import welch
 from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
+from tqdm.notebook import tqdm
 
 def extract_features(data):
     # Gaussian Smoothing
@@ -302,7 +303,6 @@ def get_label(posx, posy, centers, radii) -> int:
             return (i // 5) + 1  # Assign label based on group of 5 circles
     return 0  # Default label
 
-
 def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
     df_input['forceZ'] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
     offset = np.mean(df_input['forceZ'][df_input['isArrived_Festo'] == 1].head(20))
@@ -324,6 +324,8 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
      force_oscillation, force_relaxation, stiffness_ratio) = extract_features(df_input)  # change label
 
     label = get_label(posx, posy, centers, radii)
+
+    row = 'Test' if 90 <= posy <= 110 else 'Train'
 
     new_df = DataFrame({
         "posx": posx,
@@ -356,7 +358,8 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
         "Fi": [fi],
         "Pi": [pi],
         "Timei": [time_i],
-        "label": label
+        "label": label,
+        "Row": row
     })
 
     new_df = compute_hysteresis_features_for_df(new_df, force_column='Fi', pos_column='Pi')
@@ -376,6 +379,8 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
 
     df_list = list()
 
+    pbar = tqdm(total=len(csv_files), desc= 'Sample prossing: ')
+
     for file in csv_files:
         df = pd.read_csv(file)
         flag = (df['isTouching_SMAC'] == 0).all()
@@ -384,5 +389,6 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
         if df_ta is not None and len(df_ta) > 0:
             df_ta.insert(0, "Source", file.split("_")[-1].split(".")[0])
             df_list.append(df_ta)
+        pbar.update(1)
 
     return pd.concat(df_list, ignore_index=True)
