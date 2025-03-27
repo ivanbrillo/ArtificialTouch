@@ -379,7 +379,7 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
 
     df_list = list()
 
-    pbar = tqdm(total=len(csv_files), desc= 'Sample prossing: ')
+    pbar = tqdm(total=len(csv_files), desc= 'Sample processing: ')
 
     for file in csv_files:
         df = pd.read_csv(file)
