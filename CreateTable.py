@@ -8,7 +8,6 @@ from scipy.stats import linregress
 from scipy.signal import welch
 from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
-from tqdm.notebook import tqdm
 
 def extract_features(data):
     # Gaussian Smoothing
@@ -289,10 +288,35 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
 
 def find_inclusions(json_data):
     circles = json_data["Inclusions"]
-    c = [(circle["Position"][0] + 50, circle["Position"][1] + 50) for circle in circles]
-    r = [circle["Diameter"] / 2 for circle in circles]
-    return c, r
 
+    # Define a small clockwise rotation angle (e.g., -0.7 degrees)
+    theta = np.radians(-1)  # Negative for clockwise rotation
+
+    # Rotation matrix
+    R = np.array([[np.cos(theta), np.sin(theta)],
+                  [-np.sin(theta), np.cos(theta)]])
+
+    # Rotation center (100, 100)
+    center = np.array([100, 100])
+
+    # Original centers (before shifting)
+    c = np.array([(circle["Position"][0] + 49, circle["Position"][1] + 49) for circle in circles])
+
+    # Step 1: Shift points so that (100, 100) becomes the origin
+    c_shifted = c - center
+
+    # Step 2: Rotate the shifted points (keeping float precision)
+    c_rotated = np.dot(c_shifted, R)
+
+    # Step 3: Shift points back and **then round**
+    c_final = (c_rotated + center + np.array([-1, -1])).round().astype(int)
+
+    # Convert back to list of tuples
+    c_final_list = [tuple(point) for point in c_final]
+
+    r = [circle["Diameter"] / 2 for circle in circles]
+
+    return c_final_list, r
 
 def get_label(posx, posy, centers, radii) -> int:
     for i in range(len(centers)):
@@ -325,7 +349,7 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
 
     label = get_label(posx, posy, centers, radii)
 
-    row = 'Test' if 90 <= posy <= 110 else 'Train'
+    row = 'Test' if 110 <= posy <= 125 else 'Train'
 
     new_df = DataFrame({
         "posx": posx,
@@ -379,8 +403,6 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
 
     df_list = list()
 
-    pbar = tqdm(total=len(csv_files), desc= 'Sample processing: ')
-
     for file in csv_files:
         df = pd.read_csv(file)
         flag = (df['isTouching_SMAC'] == 0).all()
@@ -389,6 +411,5 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
         if df_ta is not None and len(df_ta) > 0:
             df_ta.insert(0, "Source", file.split("_")[-1].split(".")[0])
             df_list.append(df_ta)
-        pbar.update(1)
 
     return pd.concat(df_list, ignore_index=True)
