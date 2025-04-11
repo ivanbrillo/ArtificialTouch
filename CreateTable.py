@@ -286,30 +286,28 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
     return df
 
 
-def find_inclusions(json_data):
+import numpy as np
+
+def find_inclusions(json_data, offsetx=49, offsety=49):
     circles = json_data["Inclusions"]
 
-    # Define a small clockwise rotation angle (e.g., -0.7 degrees)
-    theta = np.radians(-1)  # Negative for clockwise rotation
+    # Define small clockwise rotation angle (-0.46 degrees)
+    theta = np.radians(-0.46)  # Negative for clockwise rotation
 
     # Rotation matrix
     R = np.array([[np.cos(theta), np.sin(theta)],
                   [-np.sin(theta), np.cos(theta)]])
 
-    # Rotation center (100, 100)
+    # Rotation center
     center = np.array([100, 100])
 
-    # Original centers (before shifting)
-    c = np.array([(circle["Position"][0] + 49, circle["Position"][1] + 49) for circle in circles])
+    # Extract original centers
+    c = np.array([(circle["Position"][0] + offsetx, circle["Position"][1] + offsety) for circle in circles])
 
-    # Step 1: Shift points so that (100, 100) becomes the origin
+    # Shift, rotate, and shift back **without rounding**
     c_shifted = c - center
-
-    # Step 2: Rotate the shifted points (keeping float precision)
     c_rotated = np.dot(c_shifted, R)
-
-    # Step 3: Shift points back and **then round**
-    c_final = (c_rotated + center + np.array([-1, -1])).round().astype(int)
+    c_final = c_rotated + center + np.array([-1, -1])  # Keep as float
 
     # Convert back to list of tuples
     c_final_list = [tuple(point) for point in c_final]
@@ -317,6 +315,7 @@ def find_inclusions(json_data):
     r = [circle["Diameter"] / 2 for circle in circles]
 
     return c_final_list, r
+
 
 def get_label(posx, posy, centers, radii) -> int:
     for i in range(len(centers)):
