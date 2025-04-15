@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-feature_list_time = [
+feature_list_time2 = [
     'Stiffness', 'Tau', 'Upstroke', 'Downstroke', 'Entropy', 'P_ss',
     'offset', 'time_to_max', 'force_overshoot', 'force_relaxation',  'stiffness_ratio', 'peak_width' ]
 
-feature_list_hysteresis = [
+feature_list_hysteresis2 = [
     'loading_unloading_area_ratio', 'cubic_coefficient',
     'quartic_coefficient', 'loading_kurtosis', 'loading_nonlinearity',
     'loading_skewness', 'force_ratio_75_25', 'hysteresis_area', 'peak_position',
@@ -18,7 +18,7 @@ feature_list_hysteresis = [
     'segment2_skew', 'segment3_skew', 'loading_energy'
 ]
 
-feature_list = feature_list_time + feature_list_hysteresis
+feature_list2 = feature_list_time2 + feature_list_hysteresis2
 
 
 def plot_class_distribution(labels, ax, title):

@@ -1,3 +1,5 @@
+from sys import dont_write_bytecode
+
 import pandas as pd
 import glob
 import numpy as np
@@ -8,6 +10,15 @@ from scipy.stats import linregress
 from scipy.signal import welch
 from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
+
+materials_label = {
+    "Dragon Skin shore 20A": 1,
+    "Dragon Skin shore 30A": 2,
+    "SORTA-Clear shore 40A": 3,
+    "PDMS shore 44": 4,
+    "Econ shore 80A": 5
+}
+
 
 def extract_features(data):
     # Gaussian Smoothing
@@ -21,6 +32,9 @@ def extract_features(data):
     fz_touch = (data['Fz_s'][data['isTouching_SMAC'] == 1]).to_numpy()
     pz_touch = (data['posz_s'][data['isTouching_SMAC'] == 1]).to_numpy()
     time_touch = data['CPXEts'][data['isTouching_SMAC'] == 1].to_numpy()
+
+    if len(time) == 0:
+        return None
 
     time_i = np.arange(time[0], time[-1], 0.001)
     time_t = np.arange(time_touch[0], time_touch[-1], 0.001)
@@ -45,17 +59,36 @@ def extract_features(data):
     F_ss = np.mean(ft[-30:])
     P_ss = np.mean(ft[-30:])
 
+    # Ensure fi has values meeting the conditions before accessing indices
+    if np.any(fi >= 0.1):
+        start_idx = np.where(fi >= 0.1)[0][0]
+        stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
+
+        if np.any(fi > 0.5):
+            idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
+            idx2 = np.where(fi >= 0.1)[0][0]  # First index where force > 0.1
+            upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
+            idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
+            idx2 = np.where(fi >= 0.1)[0][-1]  # First index where force > 0.1
+            downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
+        else:
+            upstroke = None
+            downstroke = None
+    else:
+        stiffness = None  # Or set to a default value or handle as needed
+        upstroke = None
+        downstroke = None
+
     # Hardness
-    start_idx = np.where(fi >= 0.1)[0][0]
-    stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
-
-    idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
-    idx2 = np.where(fi > 0.1)[0][0]  # First index where force > 0.1
-    upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-
-    idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
-    idx2 = np.where(fi > 0.1)[0][-1]  # First index where force > 0.1
-    downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
+    # start_idx = np.where(fi >= 0.1)[0][0]
+    # stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
+    # idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
+    # idx2 = np.where(fi > 0.1)[0][0]  # First index where force > 0.1
+    # upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
+    #
+    # idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
+    # idx2 = np.where(fi > 0.1)[0][-1]  # First index where force > 0.1
+    # downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
 
     offset = np.mean(ft[:5]) - np.mean(ft[:-10])
 
@@ -66,11 +99,14 @@ def extract_features(data):
     psd_peak = freqs[np.argmax(psd)]
 
     # Entropy of the Force Signal
-    prob_dist = np.histogram(ft, bins=30, density=True)[
-        0]  # Probability distribution
-    prob_dist = prob_dist[prob_dist > 0]  # Remove zero probabilities
-    entropy = -np.sum(prob_dist * np.log2(
-        prob_dist))  # Shannon entropy => measure of randomness (estimation of fluctuations in the signal)
+    try:
+        prob_dist = np.histogram(ft, bins=30, density=True)[
+            0]  # Probability distribution
+        prob_dist = prob_dist[prob_dist > 0]  # Remove zero probabilities
+        entropy = -np.sum(prob_dist * np.log2(
+            prob_dist))  # Shannon entropy => measure of randomness (estimation of fluctuations in the signal)
+    except Exception:
+        entropy = None
 
     # NEW FEATURES
 
@@ -87,7 +123,11 @@ def extract_features(data):
     # 3. Initial Peak Width - Different materials show different peak widths
     half_height = (force_max - fi[0]) / 2 + fi[0]
     above_half_height = np.where(fi > half_height)[0]
-    peak_width = time_i[above_half_height[-1]] - time_i[above_half_height[0]]
+
+    if len(above_half_height) > 0:
+        peak_width = time_i[above_half_height[-1]] - time_i[above_half_height[0]]
+    else:
+        peak_width = None
 
     # 5. Position Response Rate
     # Calculate the rate of position change during initial loading
@@ -110,22 +150,29 @@ def extract_features(data):
     # 8. Initial Stiffness vs Later Stiffness (Stiffness Change)
     # This can capture non-linear elastic behavior
     if len(pi) > 100 and len(fi) > 100:
-        early_stiffness_idx = np.where(fi >= 0.3 * force_max)[0][0]
-        early_stiffness = fi[early_stiffness_idx] / (pi[early_stiffness_idx] - pi[0])
 
-        late_stiffness_idx = np.where(fi >= 0.7 * force_max)[0][0]
-        late_stiffness = (fi[late_stiffness_idx] - fi[early_stiffness_idx]) / (
-                pi[late_stiffness_idx] - pi[early_stiffness_idx])
+        if np.any(fi >= 0.3 * force_max):
+            early_stiffness_idx = np.where(fi >= 0.3 * force_max)[0][0]
+            early_stiffness = fi[early_stiffness_idx] / (pi[early_stiffness_idx] - pi[0])
+        else:
+            early_stiffness = None
 
-        stiffness_ratio = late_stiffness / early_stiffness if early_stiffness != 0 else 0
+        if np.any(fi >= 0.7 * force_max):
+            late_stiffness_idx = np.where(fi >= 0.7 * force_max)[0][0]
+            late_stiffness = (fi[late_stiffness_idx] - fi[early_stiffness_idx]) / (
+                    pi[late_stiffness_idx] - pi[early_stiffness_idx])
+        else:
+            late_stiffness = None
+
+        stiffness_ratio = late_stiffness / early_stiffness if (
+                early_stiffness is not None and early_stiffness != 0 and late_stiffness is not None) else None
     else:
-        stiffness_ratio = 0
+        stiffness_ratio = None
 
     # Return all features including the new ones
     return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke, fi, pi, time_i, P_ss, offset,
             force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
             force_oscillation, force_relaxation, stiffness_ratio)
-
 
 
 def extract_curve_features(position, force):
@@ -278,6 +325,7 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
         # Align position so that the first force value above the threshold is at zero
         force_above_threshold = force > threshold
         if np.any(force_above_threshold):
+
             start_idx = np.where(force_above_threshold)[0][0]
             aligned_position = position - position[start_idx]
             feats = extract_curve_features(aligned_position, force)
@@ -288,11 +336,12 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
 
 import numpy as np
 
-def find_inclusions(json_data, offsetx=49, offsety=49):
+
+def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(49, 49)) -> tuple:
     circles = json_data["Inclusions"]
 
     # Define small clockwise rotation angle (-0.46 degrees)
-    theta = np.radians(-0.46)  # Negative for clockwise rotation
+    theta = np.radians(-0.46 + angle)  # Negative for clockwise rotation
 
     # Rotation matrix
     R = np.array([[np.cos(theta), np.sin(theta)],
@@ -302,10 +351,18 @@ def find_inclusions(json_data, offsetx=49, offsety=49):
     center = np.array([100, 100])
 
     # Extract original centers
-    c = np.array([(circle["Position"][0] + offsetx, circle["Position"][1] + offsety) for circle in circles])
+    c = np.array([(circle["Position"][0] + offset[0], circle["Position"][1] + offset[1]) for circle in circles])
 
     # Shift, rotate, and shift back **without rounding**
     c_shifted = c - center
+
+    if symmetric:
+        c_shifted = np.array([(-y, -x) for x, y in c_shifted])
+
+    if symm_v:
+        c_shifted = np.array([(-x, y) for x, y in c_shifted])
+
+
     c_rotated = np.dot(c_shifted, R)
     c_final = c_rotated + center + np.array([-1, -1])  # Keep as float
 
@@ -313,23 +370,27 @@ def find_inclusions(json_data, offsetx=49, offsety=49):
     c_final_list = [tuple(point) for point in c_final]
 
     r = [circle["Diameter"] / 2 for circle in circles]
+    materials = [circle["Material"] for circle in circles]
 
-    return c_final_list, r
+    return c_final_list, r, materials
 
 
-def get_label(posx, posy, centers, radii) -> int:
+def get_label(posx, posy, centers, radii, materials) -> int:
     for i in range(len(centers)):
         center_x, center_y = centers[i]
         radius = radii[i]
+        material = materials[i]
         # Check if point is within the circle
         if ((posx - center_x) ** 2 + (posy - center_y) ** 2) <= (radius) ** 2:
-            return (i // 5) + 1  # Assign label based on group of 5 circles
+            return materials_label[material]
+            # return (i // 5) + 1  # Assign label based on group of 5 circles
     return 0  # Default label
 
-def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
+
+def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | None:
     df_input['forceZ'] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
     offset = np.mean(df_input['forceZ'][df_input['isArrived_Festo'] == 1].head(20))
-    df_input['forceZ'] = (df_input['forceZ'] - offset) #/ np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
+    df_input['forceZ'] = (df_input['forceZ'] - offset)  # / np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
     df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 
     posx = np.round(np.mean(df_input['posx'][df_input['isArrived_Festo'] == 1] + df_input['posx_d'][
@@ -337,18 +398,22 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
     posy = np.round(np.mean(df_input['posy'][df_input['isArrived_Festo'] == 1] + df_input['posy_d'][
         df_input['isArrived_Festo'] == 1] / 1000))
 
-    if posx < 20 and posy < 20:
+    if posx < 50 or posy < 50:
         return None
 
     df_input['posz'] = df_input['posz'] + df_input['posz2'] / 200 + df_input['posz_d'] / 1000
 
+    tuple = extract_features(df_input)
+    if tuple is None:
+        return None
+
     (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke, fi, pi, time_i, P_ss, offset,
      force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
-     force_oscillation, force_relaxation, stiffness_ratio) = extract_features(df_input)  # change label
+     force_oscillation, force_relaxation, stiffness_ratio) = tuple
 
-    label = get_label(posx, posy, centers, radii)
+    label = get_label(posx, posy, centers, radii, materials)
 
-    row = 'Test' if 110 <= posy <= 125 else 'Train'
+    # row = 'Test' if 110 <= posy <= 125 else 'Train'
 
     new_df = DataFrame({
         "posx": posx,
@@ -382,20 +447,22 @@ def organize_df(df_input: DataFrame, centers, radii) -> DataFrame | None:
         "Pi": [pi],
         "Timei": [time_i],
         "label": label,
-        "Row": row
+        # "Row": row
     })
 
     new_df = compute_hysteresis_features_for_df(new_df, force_column='Fi', pos_column='Pi')
     return new_df
 
 
-def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> DataFrame | None:
+def create_df(path: str = 'DamasconeA/Dataset/*.csv', symmetric=False, symm_v=False, angle=0, offset = (49, 49)) -> DataFrame | None:
     # Load JSON file
-    with open("phantom_metadata.json", "r") as file:
+
+    strings = path.split('/')
+    with open(strings[0] + "/phantom_metadata.json", "r") as file:
         json_data = json.load(file)
 
     # Create lists of centers + radii (for each labeled area)
-    centers, radii = find_inclusions(json_data)
+    centers, radii, materials = find_inclusions(json_data, symmetric=symmetric, angle=angle, symm_v=symm_v, offset=offset)
 
     # Get list of all CSV files
     csv_files = glob.glob(path)
@@ -406,9 +473,13 @@ def create_df(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> Data
         df = pd.read_csv(file)
         flag = (df['isTouching_SMAC'] == 0).all()
         if flag: continue
-        df_ta = organize_df(df, centers, radii)
+        df_ta = organize_df(df, centers, radii, materials)
         if df_ta is not None and len(df_ta) > 0:
             df_ta.insert(0, "Source", file.split("_")[-1].split(".")[0])
             df_list.append(df_ta)
+        else:
+            print(f"File {file} has no valid data after processing.")
 
-    return pd.concat(df_list, ignore_index=True)
+    cleaned_df_list = [df.dropna(how='all') for df in df_list]
+    non_empty_df_list = [df for df in cleaned_df_list if len(df) > 0]
+    return pd.concat(non_empty_df_list, ignore_index=True)
