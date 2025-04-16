@@ -390,7 +390,7 @@ def get_label(posx, posy, centers, radii, materials) -> int:
 def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | None:
     df_input['forceZ'] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
     offset = np.mean(df_input['forceZ'][df_input['isArrived_Festo'] == 1].head(20))
-    df_input['forceZ'] = (df_input['forceZ'] - offset)  # / np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
+    df_input['forceZ'] = (df_input['forceZ'] - offset)  / np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
     df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 
     posx = np.round(np.mean(df_input['posx'][df_input['isArrived_Festo'] == 1] + df_input['posx_d'][
