@@ -3,7 +3,6 @@ import numpy as np
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 
-
 sns.set(style="whitegrid")
 
 
@@ -83,7 +82,7 @@ def plot_confusion_matrix(y_true, y_pred, title, ax, class_labels=[0, 1, 2, 3, 4
     # Only normalize rows that have samples
     for i, row_sum in enumerate(row_sums):
         if row_sum > 0:
-                cm_norm[i] = cm[i] / row_sum
+            cm_norm[i] = cm[i] / row_sum
         # rows with sum=0 remain as zeros
 
     # Plot the matrix
@@ -92,3 +91,42 @@ def plot_confusion_matrix(y_true, y_pred, title, ax, class_labels=[0, 1, 2, 3, 4
     ax.set_title(title)
     ax.set_xlabel('Predicted Label')
     ax.set_ylabel('True Label')
+
+
+# Plot the smoothing effect for comparison
+def plot_smoothing_effect(test_original, test_smooth, train_original, train_smoothed, feature):
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Plot original values
+    sc1 = axes[0][0].scatter(train_original['posx'], train_original['posy'],
+                             c=train_original[feature], cmap='viridis',
+                             s=50, alpha=0.8)
+    axes[0][0].set_title(f"Train Original {feature}")
+    axes[0][0].set_xlabel("posx")
+    axes[0][0].set_ylabel("posy")
+
+    # Plot smoothed values
+    sc2 = axes[0][1].scatter(train_smoothed['posx'], train_smoothed['posy'],
+                             c=train_smoothed[feature], cmap='viridis',
+                             s=50, alpha=0.8)
+    axes[0][1].set_title(f"Train Max Smoothed {feature}")
+    axes[0][1].set_xlabel("posx")
+    axes[0][1].set_ylabel("posy")
+
+    # Test set
+    sc3 = axes[1][0].scatter(test_original['posx'], test_original['posy'],
+                             c=test_original[feature], cmap='viridis',
+                             s=50, alpha=0.8)
+    axes[1][0].set_title(f"Test Original {feature}")
+    axes[1][0].set_xlabel("posx")
+    axes[1][0].set_ylabel("posy")
+
+    sc4 = axes[1][1].scatter(test_smooth['posx'], test_smooth['posy'],
+                             c=test_smooth[feature], cmap='viridis',
+                             s=50, alpha=0.8)
+    axes[1][1].set_title(f"Test Max Smoothed {feature}")
+    axes[1][1].set_xlabel("posx")
+    axes[1][1].set_ylabel("posy")
+
+    plt.tight_layout()
+    plt.show()
