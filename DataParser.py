@@ -23,7 +23,6 @@ def clean_df(df_input: pd.DataFrame) -> DataFrame | None:
 
     return new_df
 
-
 # Return only the signal captured when the machine is touching
 def get_df_list(path: str = 'Dataset/20250205_082609_HIST_006_CPXE_*.csv') -> list[pd.DataFrame]:
     # Get list of all CSV files
