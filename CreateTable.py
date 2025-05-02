@@ -1,3 +1,4 @@
+from statistics import correlation
 import pandas as pd
 import glob
 import numpy as np
@@ -13,6 +14,16 @@ from scipy.interpolate import griddata
 from scipy.signal import coherence
 from skimage.feature import local_binary_pattern
 from sklearn.neighbors import LocalOutlierFactor
+from scipy.optimize import curve_fit
+import pywt
+from scipy.signal import stft
+from PyEMD import EMD
+from neurokit2 import complexity
+import networkx as nx
+from scipy import ndimage
+from skimage import measure, morphology
+import antropy
+import nolds
 
 materials_label = {
     "Dragon Skin shore 20A": 1,
@@ -163,11 +174,11 @@ def extract_features(data):
     force_overshoot = (force_max - steady_state_force) / steady_state_force
 
     # 3. Initial Peak Width
-    f3db = force_max/ np.sqrt(2)
-    above_3db = np.where(fi > f3db)[0]
+    f_th = force_max
+    above_th = np.where(fi > f_th)[0]
 
-    if len(above_3db) > 0:
-        peak_width = time_i[above_3db[-1]] - time_i[above_3db[0]]
+    if len(above_th) > 0:
+        peak_width = time_i[above_th[-1]] - time_i[above_th[0]]
     else:
         peak_width = None
 
@@ -227,11 +238,12 @@ def extract_features(data):
     # Damping coefficient (Kelvin-Voigt model)
     try:
         A = np.vstack([pi, velocity]).T
-        k, c = np.linalg.lstsq(A, fi, rcond=None)[0]
+        el, c = np.linalg.lstsq(A, fi, rcond=None)[0]
         damping_coefficient = c
-        elastic_coefficient = k
+        elastic_coefficient = el
     except:
         damping_coefficient = None
+        elastic_coefficient = None
 
     # Spectral features from FFT
     n = len(fi)
@@ -275,6 +287,227 @@ def extract_features(data):
         coherence_LF = None
         coherence_HF = None
 
+    # Wavelet Transform Energy Features
+    try:
+        coeffs = pywt.wavedec(fi, 'db4', level=4)
+        wavelet_energies = [np.sum(np.square(c)) for c in coeffs]
+        wavelet_energy_total = np.sum(wavelet_energies)
+        wavelet_relative_energies = [e / wavelet_energy_total for e in wavelet_energies]
+    except Exception:
+        wavelet_relative_energies = [None] * 5
+
+    # STFT Feature
+    try:
+        f_stft, t_stft, Zxx = stft(fi, fs=1.0 / dt)
+        stft_magnitude = np.abs(Zxx)
+        stft_mean_freq = np.sum(f_stft * np.mean(stft_magnitude, axis=1)) / np.sum(np.mean(stft_magnitude, axis=1))
+    except Exception:
+        stft_mean_freq = None
+
+    # EMD Feature
+    try:
+        emd = EMD()
+        imfs = emd(fi)
+        imf_energy = [np.sum(imf ** 2) for imf in imfs[:3]]
+    except Exception:
+        imf_energy = [None, None, None]
+
+    # Contact Area Estimation using Hertz Model
+    R = 0.005  # Estimated radius in meters (~5 mm) — assumed
+    nu = 0.5  # Typical Poisson's ratio for elastomers
+    contact_area = np.pi * ((3 * (1 - nu ** 2) * force_max * R / (4 * stiffness)) ** (
+                2 / 3)) if stiffness and stiffness > 0 else None
+
+    # Adhesion Energy
+    try:
+        retraction_force = fi[force_max_idx:]
+        retraction_position = pi[force_max_idx:]
+        adhesion_energy = -np.trapz(retraction_force, retraction_position)
+    except Exception:
+        adhesion_energy = None
+
+    # Viscoelastic Models for fitting
+    def kelvin_voigt_model(t, E, eta):
+        return F_ss * (1 - np.exp(-E * t / eta))
+
+    def maxwell_model(t, E, eta):
+        return F_ss * np.exp(-E * t / eta)
+
+    def standard_linear_solid_model(t, E1, E2, eta):
+        return F_ss * (1 - (E2 / (E1 + E2)) * np.exp(-((E1 + E2) / eta) * t))
+    relax_time = time_t - time_t[0]
+    relax_force = ft
+
+    # Initialize defaults
+    kv_E, kv_eta = None, None
+    mw_E, mw_eta = None, None
+    sls_E1, sls_E2, sls_eta = None, None, None
+
+    try:
+        # Kelvin-Voigt
+        result  = curve_fit(kelvin_voigt_model, relax_time, relax_force, p0=[1, 1], maxfev=5000)
+        popt_kv = result[0]
+        kv_E, kv_eta = popt_kv
+    except:
+        pass
+
+    try:
+        # Maxwell
+        result = curve_fit(maxwell_model, relax_time, relax_force, p0=[1, 1], maxfev=5000)
+        popt_mw = result[0]
+        mw_E, mw_eta = popt_mw
+    except:
+        pass
+
+    try:
+        # SLS
+        result = curve_fit(standard_linear_solid_model, relax_time, relax_force, p0=[1, 1, 1], maxfev=5000)
+        popt_sls = result[0]
+        sls_E1, sls_E2, sls_eta = popt_sls
+    except:
+        pass
+
+    # Force peak-to-peak
+    try:
+        force_ptp = np.ptp(fi)
+    except:
+        force_ptp = np.nan
+
+    # Position peak-to-peak
+    try:
+        position_ptp = np.ptp(pi)
+    except:
+        position_ptp = np.nan
+
+    # Load duration calculation
+    try:
+        load_duration = time_i[force_max_idx] - time_i[0]
+    except:
+        load_duration = np.nan
+
+    # Unload duration calculation
+    try:
+        unload_duration = time_i[-1] - time_i[force_max_idx]
+    except:
+        unload_duration = np.nan
+
+    # Load/unload ratio
+    try:
+        load_unload_ratio = load_duration / unload_duration if unload_duration > 0 else np.nan
+    except:
+        load_unload_ratio = np.nan
+
+    # Loading slope
+    try:
+        loading_slope = (fi[force_max_idx] - fi[0]) / (pi[force_max_idx] - pi[0])
+    except:
+        loading_slope = np.nan
+
+    # Unloading slope
+    try:
+        unloading_slope = (fi[-1] - fi[force_max_idx]) / (pi[-1] - pi[force_max_idx])
+    except:
+        unloading_slope = np.nan
+
+    # Slope symmetry
+    try:
+        slope_symmetry = loading_slope / abs(unloading_slope) if unloading_slope != 0 else np.nan
+    except:
+        slope_symmetry = np.nan
+
+    # First derivative
+    try:
+        d1 = np.gradient(fi, pi)
+    except:
+        d1 = np.nan
+
+    # Second derivative
+    try:
+        d2 = np.gradient(d1, pi)
+        curvature_peak = d2[force_max_idx]
+    except:
+        d2 = np.nan
+        curvature_peak = np.nan
+
+    # Log-log slope calculation
+    try:
+        mask = pi > 0
+        log_pi = np.log10(pi[mask])
+        log_fi = np.log10(fi[mask])
+        slope_log_log, _, _, _, _ = linregress(log_pi, log_fi)
+    except:
+        slope_log_log = np.nan
+
+    # Hjorth parameters on fi
+    try:
+        activity = np.var(fi)
+    except:
+        activity = np.nan
+
+    try:
+        mobility = np.sqrt(np.var(np.diff(fi)) / activity)
+    except:
+        mobility = np.nan
+
+    try:
+        complexity_value = np.sqrt(np.var(np.diff(np.diff(fi))) / np.var(np.diff(fi))) / mobility
+    except:
+        complexity_value = np.nan
+
+    # Fractal dimensions
+    try:
+        hfd, _ = complexity.fractal_higuchi(fi, k_max='default')
+    except:
+        hfd = np.nan
+
+    try:
+        katz_fd = complexity.fractional_dimension_katz(fi)
+    except:
+        katz_fd = np.nan
+
+    # Hurst exponent
+    def hurst(ts):
+            N = len(ts)
+            T = np.arange(1, N + 1)
+            Y = np.cumsum(ts - np.mean(ts))
+            R = np.max(Y) - np.min(Y)
+            S = np.std(ts)
+            return np.log(R / S) / np.log(N)
+    try:
+        hurst_exp = hurst(fi)
+    except:
+        hurst_exp = np.nan
+
+    # Lyapunov exponent calculation
+    try:
+        eps = 1e-3
+        lyap_vals = []
+        for i in range(len(fi)):
+            for j in range(i + 1, len(fi)):
+                if abs(fi[i] - fi[j]) < eps:
+                    for k in range(1, min(len(fi) - i, len(fi) - j)):
+                        d0 = abs(fi[i] - fi[j])
+                        dn = abs(fi[i + k] - fi[j + k])
+                        if d0 > 0 and dn > 0:
+                            lyap_vals.append(np.log(dn / d0))
+        lyapunov_exp = np.mean(lyap_vals) if lyap_vals else np.nan
+    except:
+        lyapunov_exp = np.nan
+
+    # Teager-Kaiser Energy Operator
+    try:
+        tkeo = fi ** 2
+        tkeo[1:-1] -= fi[:-2] * fi[2:]
+        tkeo_mean = np.mean(tkeo[1:-1])
+    except:
+        tkeo_mean = np.nan
+
+    # Correlation between force and position
+    try:
+        correlation_fp = correlation(fi, pi)
+    except:
+        correlation_fp = np.nan
+
     # Return all features
     return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1,downstroke2, fi, pi, time_i, P_ss, offset,
             force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
@@ -283,7 +516,12 @@ def extract_features(data):
             force_rms, position_rms, damping_coefficient,
             spectral_centroid_force, spectral_entropy_force,
             spectral_centroid_position, spectral_entropy_position,
-            impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient)
+            impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient,  contact_area, adhesion_energy, wavelet_relative_energies, stft_mean_freq, imf_energy,
+            kv_E, kv_eta, mw_E, mw_eta, sls_E1, sls_E2, sls_eta, force_ptp, position_ptp, load_duration, unload_duration, load_unload_ratio,
+            loading_slope, unloading_slope, slope_symmetry, curvature_peak,
+            slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
+            hurst_exp, lyapunov_exp, tkeo_mean, correlation_fp
+            )
 
 def extract_curve_features(position, force):
     features = {}
@@ -300,12 +538,14 @@ def extract_curve_features(position, force):
     else:
         position_closed = position
         force_closed = force
-    features['hysteresis_area'] = 0.5 * abs(np.sum(
+        hysteresis_area = 0.5 * abs(np.sum(
         position_closed[:-1] * force_closed[1:] - position_closed[1:] * force_closed[:-1]
     ))
+        features['hysteresis_area'] = hysteresis_area
 
     # --- 3. Loading energy (area under loading curve) ---
-    features['loading_energy'] = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
+    loading_energy = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
+    features['loading_energy'] = loading_energy
 
     # --- 4. Loading nonlinearity ---
     if peak_idx > 10:
@@ -404,6 +644,16 @@ def extract_curve_features(position, force):
             features[f'segment{seg}_force_std'] = np.nan
             features[f'segment{seg}_skew'] = np.nan
 
+    energy_input = np.trapezoid(force[:np.argmax(force) + 1], position[:np.argmax(force) + 1])
+    if not np.isnan(hysteresis_area) and not np.isnan(energy_input):
+        energy_dissipation_ratio = hysteresis_area / energy_input
+        strain_energy_density = energy_input / (np.max(position) - np.min(position)) if np.ptp(position) > 0 else None
+    else:
+        energy_dissipation_ratio = None
+        strain_energy_density = None
+    features['strain_energy_density'] = strain_energy_density
+    features['energy_dissipation_ratio'] = energy_dissipation_ratio
+
     return features
 
 def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', threshold=0.1):
@@ -498,19 +748,19 @@ def compute_spatial_and_surface_features(df):
         (16, 2, 'uniform')  # P=16, R=2
     ]
 
-    # Check if the tau map is valid and normalize it
+    # Check if the stiffness map is valid and normalize it
     if not np.isnan(Stiffness_LBP_map).all():
-        # Normalize tau map to [0, 1] for LBP
+        # Normalize Stiffness map to [0, 1] for LBP
         if np.ptp(Stiffness_LBP_map) > 0:
-            norm_tau_map = (Stiffness_LBP_map - np.min(Stiffness_LBP_map)) / np.ptp(Stiffness_LBP_map)
+            norm_Stiffness_map = (Stiffness_LBP_map - np.min(Stiffness_LBP_map)) / np.ptp(Stiffness_LBP_map)
         else:
-            norm_tau_map = Stiffness_LBP_map - np.min(Stiffness_LBP_map)
+            norm_Stiffness_map = Stiffness_LBP_map - np.min(Stiffness_LBP_map)
 
         # Compute LBP maps
         lbp_maps = {}
         for P, R, method in lbp_params:
             try:
-                lbp_maps[(P, R)] = local_binary_pattern(norm_tau_map, P, R, method=method)
+                lbp_maps[(P, R)] = local_binary_pattern(norm_Stiffness_map, P, R, method=method)
             except Exception:
                 lbp_maps[(P, R)] = None
     else:
@@ -524,10 +774,232 @@ def compute_spatial_and_surface_features(df):
     global_median_stiffness = np.nanmedian(grids['Stiffness'])
     global_median_position = np.nanmedian(filled_position_grid)
 
+    # Morphological Descriptors from Multi-threshold Contact Maps
+    # Extract timeseries data for each point
+    force_timeseries = {}
+    position_timeseries = {}
 
+    for idx, row in df.iterrows():
+        x, y = int(row['posx']), int(row['posy'])
+        if (x, y) in existing_points:
+            force_values = np.array(row['Fi'])
+            position_values = np.array(row['Pi'])
+            if len(force_values) > 0 and len(position_values) > 0:
+                force_timeseries[(x, y)] = force_values
+                position_timeseries[(x, y)] = position_values
+
+    # Define thresholds as quantiles
+    all_forces = np.concatenate([f for f in force_timeseries.values() if len(f) > 0])
+    thresholds = np.quantile(all_forces, [0.25, 0.5, 0.75, 0.9])
+
+    # Compute morphological descriptors for each point and threshold
+    morphological_features = {point: {} for point in existing_points}
+
+    # Maximum number of timesteps to analyze
+    timesteps = min(len(next(iter(force_timeseries.values()))), 1500) if force_timeseries else 0
+
+    # For each threshold
+    for i, threshold in enumerate(thresholds):
+        # For each time point, create a binary map with padding
+        for t in range(timesteps):
+            # Create binary map with padding to avoid edge effects
+            padded_binary_map = np.zeros((height + 2, width + 2), dtype=bool)
+
+            for (x, y), forces in force_timeseries.items():
+                if t < len(forces) and forces[t] > threshold:
+                    grid_x, grid_y = x - minx + 1, y - miny + 1  # +1 for padding
+                    if 0 <= grid_x - 1 < width and 0 <= grid_y - 1 < height:
+                        padded_binary_map[grid_y, grid_x] = True
+
+            # Only process if we have some active points
+            if padded_binary_map.any():
+                # Label connected components on padded map
+                labeled_map, num_features = ndimage.label(padded_binary_map)
+
+                # For each existing point, get local morphological descriptors
+                for (x, y) in existing_points:
+                    grid_x, grid_y = x - minx + 1, y - miny + 1  # +1 for padding
+
+                    if 1 <= grid_x <= width and 1 <= grid_y <= height:
+                        # Check if this point is active
+                        is_active = padded_binary_map[grid_y, grid_x]
+
+                        if is_active:
+                            label = labeled_map[grid_y, grid_x]
+                            component = (labeled_map == label)
+
+                            # Check if component touches the border of the padded map
+                            touches_border = (
+                                    np.any(component[0, :]) or  # Top edge
+                                    np.any(component[-1, :]) or  # Bottom edge
+                                    np.any(component[:, 0]) or  # Left edge
+                                    np.any(component[:, -1])  # Right edge
+                            )
+
+                            # Compute morphological descriptors
+                            area = np.sum(component)
+                            perimeter = measure.perimeter(component)
+                            euler = measure.euler_number(component)
+
+                            # Record features with border flag
+                            key = f"morph_t{i}_time{t}"
+                            morphological_features[(x, y)][key] = {
+                                'area': area,
+                                'perimeter': perimeter,
+                                'euler': euler,
+                                'active': 1,
+                                'touches_border': int(touches_border)
+                            }
+                        else:
+                            # Record that this point was not active
+                            key = f"morph_t{i}_time{t}"
+                            morphological_features[(x, y)][key] = {
+                                'area': 0,
+                                'perimeter': 0,
+                                'euler': 0,
+                                'active': 0,
+                                'touches_border': 0
+                            }
+
+    # Add spatial position context for edge awareness
+    for point in existing_points:
+        x, y = point
+        # Calculate distance to nearest edge
+        dist_to_edge_x = min(x - minx, maxx - x)
+        dist_to_edge_y = min(y - miny, maxy - y)
+        dist_to_edge = min(dist_to_edge_x, dist_to_edge_y)
+
+        # Is this a corner point?
+        is_corner = (dist_to_edge_x <= 1 and dist_to_edge_y <= 1)
+
+        # Store these in our features
+        morphological_features[point]['dist_to_edge'] = dist_to_edge
+        morphological_features[point]['is_corner'] = int(is_corner)
+
+    # Aggregate morphological features over time
+    for point in existing_points:
+        # For each threshold
+        for i in range(len(thresholds)):
+            # Collect values across time
+            areas = []
+            perimeters = []
+            eulers = []
+            actives = []
+            border_touches = []
+
+            for t in range(timesteps):
+                key = f"morph_t{i}_time{t}"
+                if key in morphological_features[point]:
+                    areas.append(morphological_features[point][key]['area'])
+                    perimeters.append(morphological_features[point][key]['perimeter'])
+                    eulers.append(morphological_features[point][key]['euler'])
+                    actives.append(morphological_features[point][key]['active'])
+                    border_touches.append(morphological_features[point][key]['touches_border'])
+
+            # Compute statistics
+            if areas:
+                morphological_features[point][f'area_mean_t{i}'] = np.mean(areas)
+                morphological_features[point][f'area_std_t{i}'] = np.std(areas)
+                morphological_features[point][f'perimeter_mean_t{i}'] = np.mean(perimeters)
+                morphological_features[point][f'perimeter_std_t{i}'] = np.std(perimeters)
+                morphological_features[point][f'euler_mean_t{i}'] = np.mean(eulers)
+                morphological_features[point][f'active_ratio_t{i}'] = np.mean(actives)
+                morphological_features[point][f'border_touch_ratio_t{i}'] = np.mean(border_touches)
+            else:
+                # Default values if no data
+                morphological_features[point][f'area_mean_t{i}'] = np.nan
+                morphological_features[point][f'area_std_t{i}'] = np.nan
+                morphological_features[point][f'perimeter_mean_t{i}'] = np.nan
+                morphological_features[point][f'perimeter_std_t{i}'] = np.nan
+                morphological_features[point][f'euler_mean_t{i}'] = np.nan
+                morphological_features[point][f'active_ratio_t{i}'] = np.nan
+                morphological_features[point][f'border_touch_ratio_t{i}'] = np.nan
+
+    # Permutation Entropy and Fractal Measures
+    # For each point, compute these measures from the force signal
+    entropy_features = {}
+    fractal_features = {}
+
+    min_ts_length = 8  # Minimum time series length for reliable calculations
+
+    for point in existing_points:
+        if point in force_timeseries and len(force_timeseries[point]) >= min_ts_length:
+            force_signal = force_timeseries[point]
+
+            # Ensure signal has sufficient variance for meaningful analysis
+            if np.std(force_signal) > 1e-6:
+                # Compute permutation entropy with error handling
+                try:
+                    # Permutation entropy with embedding dimension 3, delay 1
+                    perm_entropy = antropy.perm_entropy(force_signal, order=3, delay=1, normalize=True)
+                    # Sample entropy
+                    sample_entropy = antropy.sample_entropy(force_signal)
+                    # Approximate entropy
+                    approx_entropy = antropy.app_entropy(force_signal)
+                except Exception:
+                    perm_entropy = np.nan
+                    sample_entropy = np.nan
+                    approx_entropy = np.nan
+
+                entropy_features[point] = {
+                    'perm_entropy': perm_entropy,
+                    'sample_entropy': sample_entropy,
+                    'approx_entropy': approx_entropy
+                }
+
+                # Compute fractal measures with error handling
+                try:
+                    # Hurst exponent (with bounds check)
+                    hurst_exp = nolds.hurst_rs(force_signal)
+                    hurst_exp = max(0.0, min(1.0, hurst_exp))  # Valid range is [0,1]
+
+                    # Detrended fluctuation analysis
+                    dfa_alpha = nolds.dfa(force_signal, overlap=True)
+
+                    # Correlation dimension if signal is long enough
+                    if len(force_signal) >= 50:
+                        corr_dim = nolds.corr_dim(force_signal, emb_dim=3)
+                    else:
+                        corr_dim = np.nan
+
+                except Exception:
+                    hurst_exp = np.nan
+                    dfa_alpha = np.nan
+                    corr_dim = np.nan
+
+                fractal_features[point] = {
+                    'hurst_exponent': hurst_exp,
+                    'dfa_alpha': dfa_alpha,
+                    'correlation_dim': corr_dim
+                }
+            else:
+                # Signal has no variance
+                entropy_features[point] = {
+                    'perm_entropy': 0,
+                    'sample_entropy': 0,
+                    'approx_entropy': 0
+                }
+                fractal_features[point] = {
+                    'hurst_exponent': 0.5,  # Random walk value
+                    'dfa_alpha': 0.5,  # Random walk value
+                    'correlation_dim': np.nan
+                }
+        else:
+            # Default values if insufficient data
+            entropy_features[point] = {
+                'perm_entropy': np.nan,
+                'sample_entropy': np.nan,
+                'approx_entropy': np.nan
+            }
+            fractal_features[point] = {
+                'hurst_exponent': np.nan,
+                'dfa_alpha': np.nan,
+                'correlation_dim': np.nan
+            }
     # Only process for EXISTING points
     for idx, row in df.iterrows():
         orig_x, orig_y = int(row['posx']), int(row['posy'])
+        point = (orig_x, orig_y)
 
         # Check if this point actually exists in the original data
         if (orig_x, orig_y) in existing_points:
@@ -783,6 +1255,33 @@ def compute_spatial_and_surface_features(df):
 
                 df.at[idx, 'surface_type'] = surface_type
 
+                # Add morphological features
+                for i in range(len(thresholds)):
+                    df.at[idx, f'morph_area_mean_t{i}'] = morphological_features[point][f'area_mean_t{i}']
+                    df.at[idx, f'morph_area_std_t{i}'] = morphological_features[point][f'area_std_t{i}']
+                    df.at[idx, f'morph_perimeter_mean_t{i}'] = morphological_features[point][f'perimeter_mean_t{i}']
+                    df.at[idx, f'morph_perimeter_std_t{i}'] = morphological_features[point][f'perimeter_std_t{i}']
+                    df.at[idx, f'morph_euler_mean_t{i}'] = morphological_features[point][f'euler_mean_t{i}']
+                    df.at[idx, f'morph_active_ratio_t{i}'] = morphological_features[point][f'active_ratio_t{i}']
+                    df.at[idx, f'morph_border_touch_ratio_t{i}'] = morphological_features[point][f'border_touch_ratio_t{i}']
+
+                # Add position context for edge awareness
+                df.at[idx, 'dist_to_grid_edge'] = morphological_features[point]['dist_to_edge']
+                df.at[idx, 'is_grid_corner'] = morphological_features[point]['is_corner']
+
+                # Add entropy features
+                if point in entropy_features:
+                    df.at[idx, 'perm_entropy'] = entropy_features[point]['perm_entropy']
+                    df.at[idx, 'sample_entropy'] = entropy_features[point]['sample_entropy']
+                    df.at[idx, 'approx_entropy'] = entropy_features[point]['approx_entropy']
+
+                # Add fractal features
+                if point in fractal_features:
+                    df.at[idx, 'hurst_exponent'] = fractal_features[point]['hurst_exponent']
+                    df.at[idx, 'dfa_alpha'] = fractal_features[point]['dfa_alpha']
+                    df.at[idx, 'correlation_dim'] = fractal_features[point]['correlation_dim']
+
+
     return df
 
 
@@ -899,7 +1398,13 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
      force_rms, position_rms, damping_coefficient,
      spectral_centroid_force, spectral_entropy_force,
      spectral_centroid_position, spectral_entropy_position,
-     impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient) = tuple
+     impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient,
+     contact_area, adhesion_energy, wavelet_relative_energies, stft_mean_freq, imf_energy,
+     kv_E, kv_eta, mw_E, mw_eta, sls_E1, sls_E2, sls_eta, force_ptp, position_ptp, load_duration, unload_duration, load_unload_ratio,
+     loading_slope, unloading_slope, slope_symmetry, curvature_peak,
+     slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
+     hurst_exp, lyapunov_exp, tkeo_mean, correlation_fp
+     ) = tuple
 
     label = get_label(posx, posy, centers, radii, materials)
 
@@ -947,6 +1452,44 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "coherence_LF": coherence_LF,
         "coherence_HF": coherence_HF,
         "elastic_coeff": elastic_coefficient,
+        "contact_area": contact_area,
+        "adhesion_energy": adhesion_energy,
+        "wavelet_energy_0": wavelet_relative_energies[0],
+        "wavelet_energy_1": wavelet_relative_energies[1],
+        "wavelet_energy_2": wavelet_relative_energies[2],
+        "wavelet_energy_3": wavelet_relative_energies[3],
+        "wavelet_energy_4": wavelet_relative_energies[4],
+        "stft_mean_freq": stft_mean_freq,
+        "imf_energy_0": imf_energy[0],
+        "imf_energy_1": imf_energy[1],
+        "imf_energy_2": imf_energy[2],
+        "kv_E": kv_E,
+        "kv_eta": kv_eta,
+        "mw_E": mw_E,
+        "mw_eta": mw_eta,
+        "sls_E1": sls_E1,
+        "sls_E2": sls_E2,
+        "sls_eta": sls_eta,
+        "force_ptp": force_ptp,
+        "position_ptp": position_ptp,
+        "load_duration": load_duration,
+        "unload_duration": unload_duration,
+        "load_unload_ratio": load_unload_ratio,
+        "loading_slope": loading_slope,
+        "unloading_slope": unloading_slope,
+        "slope_symmetry": slope_symmetry,
+        "curvature_peak": curvature_peak,
+        "slope_log_log": slope_log_log,
+        "activity": activity,
+        "mobility": mobility,
+        "complexity_value": complexity_value,
+        "hfd": hfd,
+        "katz_fd": katz_fd,
+        "hurst_exp": hurst_exp,
+        "lyapunov_exp": lyapunov_exp,
+        "tkeo_mean": tkeo_mean,
+        "correlation_fp": correlation_fp,
+
         # Keep raw signals for later processing
         "t": [df_input['CPXEts'].tolist()],
         "Fz_s": [df_input['Fz_s'].tolist()],
