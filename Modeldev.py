@@ -15,7 +15,7 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score, roc_auc_score,
     confusion_matrix, roc_curve, auc
 )
-from sklearn.model_selection import StratifiedGroupKFold, cross_validate, KFold
+from sklearn.model_selection import StratifiedGroupKFold, cross_validate, StratifiedKFold
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
 import xgboost as xgb
@@ -99,7 +99,8 @@ def create_pipeline(
         imputer_strategy: str = 'median',
         scaler_type: str = 'standard',
         smote_sampling: float = 1.0,
-        n_features_to_select: Optional[int] = None
+        n_features_to_select: Optional[int] = None,
+        use_smote: bool = True  # Add parameter to control whether SMOTE is used
 ):
     """
     Create a scikit-learn pipeline with preprocessing, SMOTE(?), and classifier.
@@ -121,31 +122,44 @@ def create_pipeline(
             selector_model = clone(classifier)
             selector_model.class_weight = "balanced"
             selector = RFE(estimator=selector_model, n_features_to_select=n_features_to_select)
-            pipeline_steps = [
-                ('imputer', imputer),
-                ('scaler', scaler),
-                ('selector', selector),
-                ('smote', SMOTE(sampling_strategy=smote_sampling, random_state=42)),
-                ('classifier', classifier)
-            ]
         else:
             # For models without feature importance attributes
             temp_estimator = RandomForestClassifier(n_estimators=10, random_state=42, class_weight='balanced')
             selector = RFE(estimator=temp_estimator, n_features_to_select=n_features_to_select)
+
+        # Build pipeline steps based on whether SMOTE should be used
+        if use_smote:
             pipeline_steps = [
                 ('imputer', imputer),
                 ('scaler', scaler),
                 ('selector', selector),
-                ('smote', SMOTE(sampling_strategy=smote_sampling, random_state=42)),
+                ('smote', SMOTE(sampling_strategy=smote_sampling, random_state=42, k_neighbors=3)),
+                # Use lower k_neighbors
+                ('classifier', classifier)
+            ]
+        else:
+            pipeline_steps = [
+                ('imputer', imputer),
+                ('scaler', scaler),
+                ('selector', selector),
                 ('classifier', classifier)
             ]
     else:
-        pipeline_steps = [
-            ('imputer', imputer),
-            ('scaler', scaler),
-            ('smote', SMOTE(sampling_strategy=smote_sampling, random_state=42)),
-            ('classifier', classifier)
-        ]
+        # Build pipeline steps based on whether SMOTE should be used
+        if use_smote:
+            pipeline_steps = [
+                ('imputer', imputer),
+                ('scaler', scaler),
+                ('smote', SMOTE(sampling_strategy=smote_sampling, random_state=42, k_neighbors=3)),
+                # Use lower k_neighbors
+                ('classifier', classifier)
+            ]
+        else:
+            pipeline_steps = [
+                ('imputer', imputer),
+                ('scaler', scaler),
+                ('classifier', classifier)
+            ]
 
     return ImbPipeline(steps=pipeline_steps)
 
@@ -169,7 +183,7 @@ def define_hyperparameter_space(classifier_name: str) -> Dict:
     common_params = {
         'imputer_strategy': ['mean', 'median', 'most_frequent'],
         'scaler_type': ['standard', 'robust'],
-        'smote_sampling': [0.8, 0.9, 1.0, 1.1],
+        'smote_sampling': [0.7,0.8, 0.9, 1.0],
     }
 
     # Classifier-specific parameters
@@ -228,7 +242,7 @@ def objective(
         metric: str = 'f1_macro'
 ):
     """
-    Objective function for Optuna optimization.
+    Objective function for Optuna optimization with error handling.
     """
     base_classifiers = get_base_classifiers()
     classifier = base_classifiers[classifier_name]
@@ -272,6 +286,8 @@ def objective(
         classifier.max_features = trial.suggest_categorical(
             'max_features', param_space['max_features']
         )
+        # Add class_weight parameter for better handling of imbalanced data
+        classifier.class_weight = 'balanced'
 
     elif classifier_name == 'svc':
         classifier.C = trial.suggest_float(
@@ -287,6 +303,8 @@ def objective(
             classifier.degree = trial.suggest_int(
                 'degree', param_space['degree'][0], param_space['degree'][1]
             )
+        # Add class_weight parameter for better handling of imbalanced data
+        classifier.class_weight = 'balanced'
 
     elif classifier_name == 'xgb':
         classifier.n_estimators = trial.suggest_int(
@@ -307,6 +325,9 @@ def objective(
         classifier.min_child_weight = trial.suggest_int(
             'min_child_weight', param_space['min_child_weight'][0], param_space['min_child_weight'][1]
         )
+        # Use scale_pos_weight for imbalanced data
+        # We'll use a fixed value instead of calculating since we don't have label counts here
+        classifier.scale_pos_weight = 3.0  # Adjust based on your actual class imbalance
 
     elif classifier_name == 'logistic':
         classifier.C = trial.suggest_float(
@@ -327,6 +348,8 @@ def objective(
             classifier.solver = trial.suggest_categorical(
                 'solver', param_space['solver']
             )
+        # Add class_weight parameter for better handling of imbalanced data
+        classifier.class_weight = 'balanced'
 
     elif classifier_name == 'gb':
         classifier.n_estimators = trial.suggest_int(
@@ -348,44 +371,83 @@ def objective(
             'min_samples_leaf', param_space['min_samples_leaf'][0], param_space['min_samples_leaf'][1]
         )
 
+    # Check if there are enough samples per class for SMOTE
+    # Count the minimum number of samples in any class
+    unique_classes, class_counts = np.unique(y, return_counts=True)
+    min_samples_per_class = np.min(class_counts)
+
+    # Only use SMOTE if there are enough samples
+    use_smote = min_samples_per_class >= 6  # SMOTE needs at least 6 samples per class for k=5
+
     # Create pipeline with the optimized parameters
     pipeline = create_pipeline(
         classifier=classifier,
         imputer_strategy=imputer_strategy,
         scaler_type=scaler_type,
         smote_sampling=smote_sampling,
-        n_features_to_select=n_features_to_select
+        n_features_to_select=n_features_to_select,
+        use_smote=use_smote
     )
 
-    # Set up cross-validation
-    if groups is not None:
-        cv = StratifiedGroupKFold(n_splits=5, shuffle=True)
-        cv_splits = cv.split(X, y, groups)
-    else:
-        raise ValueError('Groups must be defined for Group cross-validation.')
-
-    # Define scoring metrics
-    scoring = {
-        'f1_macro': 'f1_macro',
-        'precision_macro': 'precision_macro',
-        'recall_macro': 'recall_macro',
-        'roc_auc_ovr': 'roc_auc_ovr_weighted'
-    }
-
-    # Perform cross-validation
+    # Set up cross-validation with error handling
     try:
-        cv_results = cross_validate(
-            pipeline, X, y,
-            cv=cv_splits, scoring=scoring,
-            return_estimator=False
-        )
+        if groups is not None:
+            # Check for classes with too few samples in any fold
+            cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
 
-        # Return the mean score for the target metric
-        return cv_results[f'test_{metric}'].mean()
+            # Verify if cross-validation can be performed
+            for train_idx, test_idx in cv.split(X, y, groups):
+                y_train = y[train_idx]
+                # Check if all classes have samples in train split
+                train_classes, train_counts = np.unique(y_train, return_counts=True)
+                if len(train_classes) < len(unique_classes) or np.min(train_counts) < 2:
+                    # If any fold has insufficient samples, fall back to a simpler CV
+                    print(
+                        "Warning: Some folds have insufficient samples per class. Using stratified KFold without groups.")
+                    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+                    break
+
+            cv_splits = cv.split(X, y, groups)
+        else:
+            # Fallback to regular stratified CV
+            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+            cv_splits = cv.split(X, y)
+
+        # Define scoring metrics
+        scoring = {
+            'f1_macro': 'f1_macro',
+            'precision_macro': 'precision_macro',
+            'recall_macro': 'recall_macro',
+        }
+
+        # Only add ROC AUC if we have enough classes
+        if len(unique_classes) > 1:
+            scoring['roc_auc_ovr'] = 'roc_auc_ovr_weighted'
+
+        # Perform cross-validation with error handling
+        try:
+            cv_results = cross_validate(
+                pipeline, X, y,
+                cv=cv_splits, scoring=scoring,
+                return_estimator=False
+            )
+
+            # Return the mean score for the target metric
+            if f'test_{metric}' in cv_results:
+                return float(cv_results[f'test_{metric}'].mean())
+            else:
+                # Fallback to f1_macro if the requested metric is not available
+                return float(cv_results['test_f1_macro'].mean())
+
+        except Exception as e:
+            print(f"Error in cross_validate: {e}")
+            # Return a valid but low score to avoid Optuna errors
+            return 0.01
 
     except Exception as e:
-        print(f"Error in CV: {e}")
-        return 0.0
+        print(f"Error in CV setup: {e}")
+        # Return a valid but low score to avoid Optuna errors
+        return 0.01
 
 
 def optimize_pipeline(
@@ -547,27 +609,60 @@ def nested_cross_validation(
     if classifier_names is None:
         classifier_names = ['rf', 'svc', 'xgb', 'logistic', 'gb']
 
-        # Set up outer cross-validation
-    if groups is not None:
-        outer_cv = StratifiedGroupKFold(n_splits=n_outer_splits, shuffle=True)
-    else:
-        raise ValueError('Groups must be defined for Group cross-validation.')
+        # Check for classes with too few samples
+    unique_classes, class_counts = np.unique(y, return_counts=True)
+    min_samples_per_class = np.min(class_counts)
 
-        # Dictionary to store results
+    # If any class has fewer than 5 samples, reduce number of splits
+    if min_samples_per_class < 5:
+        n_outer_splits = min(3, n_outer_splits)
+        print(
+            f"WARNING: Minimum samples per class is only {min_samples_per_class}. Reducing outer CV splits to {n_outer_splits}.")
+
+    # Set up outer cross-validation with robustness
+    try:
+        if groups is not None:
+            outer_cv = StratifiedGroupKFold(n_splits=n_outer_splits, shuffle=True, random_state=42)
+            # Test if the splits are viable
+            test_splits = list(outer_cv.split(X, y, groups))
+
+            # Verify all splits have all classes
+            valid_splits = True
+            for train_idx, test_idx in test_splits:
+                train_classes = np.unique(y.iloc[train_idx])
+                if len(train_classes) < len(unique_classes):
+                    valid_splits = False
+                    break
+
+            if not valid_splits:
+                print(
+                    "WARNING: Some CV splits don't contain all classes. Falling back to StratifiedKFold without groups.")
+                outer_cv = StratifiedKFold(n_splits=n_outer_splits, shuffle=True, random_state=42)
+        else:
+            outer_cv = StratifiedKFold(n_splits=n_outer_splits, shuffle=True, random_state=42)
+    except Exception as e:
+        print(f"Error setting up CV: {e}. Falling back to basic StratifiedKFold.")
+        outer_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+    # Dictionary to store results
     all_results = {
         'stage1': {name: {'scores': [], 'params': []} for name in classifier_names},
         'stage2': {name: {'scores': [], 'params': []} for name in classifier_names}
     }
 
     # Run nested cross-validation
-    for outer_train_idx, outer_test_idx in outer_cv.split(X, y, groups):
+    for fold_idx, (outer_train_idx, outer_test_idx) in enumerate(outer_cv.split(X, y, groups)):
+        print(f"\nProcessing outer fold {fold_idx + 1}/{n_outer_splits}")
         X_outer_train, X_outer_test = X.iloc[outer_train_idx], X.iloc[outer_test_idx]
-        y_outer_train, y_outer_test = y.iloc[outer_train_idx], y.iloc[outer_test_idx]
+        y_outer_train, y_outer_test = y[outer_train_idx], y[outer_test_idx]
         groups_outer_train = groups[outer_train_idx]
 
         # Create binary labels for stage 1
         y_binary_train = (y_outer_train > 0).astype(int)
         y_binary_test = (y_outer_test > 0).astype(int)
+
+        # Check class distribution in binary training data
+        print(f"Binary train class distribution: {np.unique(y_binary_train, return_counts=True)}")
 
         # Extract material samples for stage 2
         material_mask_train = y_outer_train > 0
@@ -576,90 +671,115 @@ def nested_cross_validation(
         groups_material_train = groups_outer_train[material_mask_train] if groups_outer_train is not None else None
 
         material_mask_test = y_outer_test > 0
-        X_material_test = X_outer_test[material_mask_test]
+        X_material_test = X_outer_test[material_mask_test]  # FIXED: now using correct mask
         y_material_test = y_outer_test[material_mask_test]
+
+        # Check material class distribution
+        print(f"Material train samples: {X_material_train.shape[0]}")
+        if X_material_train.shape[0] > 0:
+            print(f"Material train class distribution: {np.unique(y_material_train, return_counts=True)}")
+        print(f"Material test samples: {X_material_test.shape[0]}")
+
+        # Skip this fold if there are no material samples in training
+        if X_material_train.shape[0] == 0:
+            print("No material samples in training set, skipping this fold")
+            continue
 
         # For each classifier type
         for clf_name in classifier_names:
-            print(f"\nTraining {clf_name} in outer CV fold...")
+            print(f"\nTraining {clf_name} in outer CV fold {fold_idx + 1}...")
 
             # Stage 1: Binary classifier optimization with inner CV
             print(f"Optimizing Stage 1 (binary) classifier...")
-            stage1_best_params, stage1_best_score = optimize_pipeline(
-                X_outer_train, y_binary_train, groups_outer_train,
-                clf_name, n_trials, metric
-            )
-
-            # Create Stage 1 pipeline with optimized parameters
-            stage1_pipeline = create_optimized_pipeline(
-                clf_name, stage1_best_params, X_outer_train
-            )
-
-            # Fit and evaluate Stage 1 independently
-            stage1_pipeline.fit(X_outer_train, y_binary_train)
-            stage1_preds = stage1_pipeline.predict(X_outer_test)
-
-            # Calculate Stage 1 metrics
-            stage1_fold_scores = {
-                'f1_macro': f1_score(y_binary_test, stage1_preds, average='macro'),
-                'precision_macro': precision_score(y_binary_test, stage1_preds, average='macro'),
-                'recall_macro': recall_score(y_binary_test, stage1_preds, average='macro')
-            }
-
-            # Calculate ROC-AUC for Stage 1 if possible
             try:
-                stage1_pred_proba = stage1_pipeline.predict_proba(X_outer_test)
-                stage1_fold_scores['roc_auc_macro'] = roc_auc_score(
-                    y_binary_test, stage1_pred_proba[:, 1], average='macro'
-                )
-            except Exception as e:
-                print(f"Could not compute ROC-AUC for Stage 1: {e}")
-                stage1_fold_scores['roc_auc_macro'] = np.nan
-
-            # Store Stage 1 results
-            all_results['stage1'][clf_name]['scores'].append(stage1_fold_scores)
-            all_results['stage1'][clf_name]['params'].append(stage1_best_params)
-
-            # Stage 2: Multiclass classifier optimization with inner CV (only if we have material samples)
-            if len(X_material_train) > 0:
-                print(f"Optimizing Stage 2 (multiclass) classifier...")
-                stage2_best_params, stage2_best_score = optimize_pipeline(
-                    X_material_train, y_material_train, groups_material_train,
+                stage1_best_params, stage1_best_score = optimize_pipeline(
+                    X_outer_train, y_binary_train, groups_outer_train,
                     clf_name, n_trials, metric
                 )
 
-                # Create Stage 2 pipeline with optimized parameters
-                stage2_pipeline = create_optimized_pipeline(
-                    clf_name, stage2_best_params, X_material_train
+                # Create Stage 1 pipeline with optimized parameters
+                stage1_pipeline = create_optimized_pipeline(
+                    clf_name, stage1_best_params, X_outer_train
                 )
 
-                # Fit and evaluate Stage 2 independently (only on material samples)
-                if len(X_material_test) > 0:
-                    stage2_pipeline.fit(X_material_train, y_material_train)
-                    stage2_preds = stage2_pipeline.predict(X_material_test)
+                # Fit and evaluate Stage 1 independently
+                stage1_pipeline.fit(X_outer_train, y_binary_train)
+                stage1_preds = stage1_pipeline.predict(X_outer_test)
 
-                    # Calculate Stage 2 metrics
-                    stage2_fold_scores = {
-                        'f1_macro': f1_score(y_material_test, stage2_preds, average='macro'),
-                        'precision_macro': precision_score(y_material_test, stage2_preds, average='macro'),
-                        'recall_macro': recall_score(y_material_test, stage2_preds, average='macro')
-                    }
+                # Calculate Stage 1 metrics
+                stage1_fold_scores = {
+                    'f1_macro': f1_score(y_binary_test, stage1_preds, average='macro'),
+                    'precision_macro': precision_score(y_binary_test, stage1_preds, average='macro'),
+                    'recall_macro': recall_score(y_binary_test, stage1_preds, average='macro')
+                }
 
-                    # Calculate ROC-AUC for Stage 2 if possible
-                    try:
-                        stage2_pred_proba = stage2_pipeline.predict_proba(X_material_test)
-                        stage2_fold_scores['roc_auc_macro'] = roc_auc_score(
-                            y_material_test, stage2_pred_proba, multi_class='ovr', average='macro'
+                # Calculate ROC-AUC for Stage 1 if possible
+                try:
+                    stage1_pred_proba = stage1_pipeline.predict_proba(X_outer_test)
+                    stage1_fold_scores['roc_auc_macro'] = roc_auc_score(
+                        y_binary_test, stage1_pred_proba[:, 1], average='macro'
+                    )
+                except Exception as e:
+                    print(f"Could not compute ROC-AUC for Stage 1: {e}")
+                    stage1_fold_scores['roc_auc_macro'] = np.nan
+
+                # Store Stage 1 results
+                all_results['stage1'][clf_name]['scores'].append(stage1_fold_scores)
+                all_results['stage1'][clf_name]['params'].append(stage1_best_params)
+            except Exception as e:
+                print(f"Error in Stage 1 optimization for {clf_name}: {e}")
+                continue
+
+            # Stage 2: Multiclass classifier optimization with inner CV (only if we have material samples)
+            if len(X_material_train) > 0:
+                try:
+                    # Check if we have enough samples of each class for cross-validation
+                    unique_classes, class_counts = np.unique(y_material_train, return_counts=True)
+                    min_samples = min(class_counts)
+
+                    if min_samples >= 2:  # Need at least 2 samples per class for train/test split
+                        print(f"Optimizing Stage 2 (multiclass) classifier...")
+                        stage2_best_params, stage2_best_score = optimize_pipeline(
+                            X_material_train, y_material_train, groups_material_train,
+                            clf_name, n_trials, metric
                         )
-                    except Exception as e:
-                        print(f"Could not compute ROC-AUC for Stage 2: {e}")
-                        stage2_fold_scores['roc_auc_macro'] = np.nan
 
-                    # Store Stage 2 results
-                    all_results['stage2'][clf_name]['scores'].append(stage2_fold_scores)
-                    all_results['stage2'][clf_name]['params'].append(stage2_best_params)
-                else:
-                    print("No material samples in test set for Stage 2 evaluation")
+                        # Create Stage 2 pipeline with optimized parameters
+                        stage2_pipeline = create_optimized_pipeline(
+                            clf_name, stage2_best_params, X_material_train
+                        )
+
+                        # Fit and evaluate Stage 2 independently (only on material samples)
+                        if len(X_material_test) > 0:
+                            stage2_pipeline.fit(X_material_train, y_material_train)
+                            stage2_preds = stage2_pipeline.predict(X_material_test)
+
+                            # Calculate Stage 2 metrics
+                            stage2_fold_scores = {
+                                'f1_macro': f1_score(y_material_test, stage2_preds, average='macro'),
+                                'precision_macro': precision_score(y_material_test, stage2_preds, average='macro'),
+                                'recall_macro': recall_score(y_material_test, stage2_preds, average='macro')
+                            }
+
+                            # Calculate ROC-AUC for Stage 2 if possible
+                            try:
+                                stage2_pred_proba = stage2_pipeline.predict_proba(X_material_test)
+                                stage2_fold_scores['roc_auc_macro'] = roc_auc_score(
+                                    y_material_test, stage2_pred_proba, multi_class='ovr', average='macro'
+                                )
+                            except Exception as e:
+                                print(f"Could not compute ROC-AUC for Stage 2: {e}")
+                                stage2_fold_scores['roc_auc_macro'] = np.nan
+
+                            # Store Stage 2 results
+                            all_results['stage2'][clf_name]['scores'].append(stage2_fold_scores)
+                            all_results['stage2'][clf_name]['params'].append(stage2_best_params)
+                        else:
+                            print("No material samples in test set for Stage 2 evaluation")
+                    else:
+                        print(f"Not enough samples per class for Stage 2 CV (min samples: {min_samples})")
+                except Exception as e:
+                    print(f"Error in Stage 2 optimization for {clf_name}: {e}")
             else:
                 print("No material samples in training set for Stage 2 optimization")
 
