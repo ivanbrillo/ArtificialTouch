@@ -15,15 +15,16 @@ from scipy.signal import coherence
 from skimage.feature import local_binary_pattern
 from sklearn.neighbors import LocalOutlierFactor
 from scipy.optimize import curve_fit
-import pywt
+from pywt import wavedec
 from scipy.signal import stft
 from PyEMD import EMD
 from neurokit2 import complexity
-import networkx as nx
 from scipy import ndimage
 from skimage import measure, morphology
 import antropy
 import nolds
+from scipy.ndimage import sobel, laplace
+from skimage.feature import hog
 
 materials_label = {
     "Dragon Skin shore 20A": 1,
@@ -63,193 +64,158 @@ def extract_features(data):
     pi = g(time_i)
     pt = g2(time_t)
 
-    # Force Decay Rate (τ)
-    decay_time = time_t - time_t[0]
-    decay_force = np.log(ft)  # Log transform to get a linear function like ln(F) = -t/tau + c
-    tau, _, _, _, _ = linregress(decay_time, decay_force)
-    tau = -1 / tau  # Convert to time constant
-
-    # Steady-State Force (F_ss) - Mean force at end of signal
-    F_ss = np.mean(ft[-30:])
-    P_ss = np.mean(ft[-30:])
-
-    # Calculate stiffness and stroke rates using thresholds relative to peak force
-    if len(fi) > 0:  # Make sure we have data
-        peak_force = np.max(fi)
-        peak_idx = np.argmax(fi)
-
-        # Define thresholds as percentages of peak force
-        low_threshold = 0.1 * peak_force
-        mid_threshold = 0.5 * peak_force
-        high_threshold = 0.75 * peak_force
-
-        # Check if we have enough force data to analyze
-        if peak_force > 0:
-            # Find indices for upstroke (start to peak)
-            up_start_indices = np.where(fi >= low_threshold)[0]
-            if len(up_start_indices) > 0:
-                up_start_idx = up_start_indices[0]  # First point exceeding low threshold
-
-                # Calculate overall stiffness from low threshold to peak
-                stiffness = (peak_force - fi[up_start_idx]) / (pi[peak_idx] - pi[up_start_idx])
-
-                # Calculate upstroke rate (from low to mid threshold)
-                mid_up_indices = np.where(fi >= mid_threshold)[0]
-                if len(mid_up_indices) > 0:
-                    mid_up_idx = mid_up_indices[0]  # First point exceeding mid threshold
-                    upstroke = (fi[mid_up_idx] - fi[up_start_idx]) / (pi[mid_up_idx] - pi[up_start_idx])
-                else:
-                    upstroke = None
-
-                # Calculate downstroke1 rate (from peak to high threshold on descent)
-                post_peak_indices = np.where((fi <= high_threshold) & (np.arange(len(fi)) > peak_idx))[0]
-                if len(post_peak_indices) > 0:
-                    down1_idx = post_peak_indices[0]  # First point after peak dropping below high threshold
-                    downstroke1 = (peak_force - fi[down1_idx]) / (pi[peak_idx] - pi[down1_idx]) # to keep it positive
-                else:
-                    downstroke1 = None
-
-                # Calculate downstroke2 rate (from high to low threshold on descent)
-                down_end_indices = np.where((fi <= low_threshold) & (np.arange(len(fi)) > peak_idx))[0]
-                if len(post_peak_indices) > 0 and len(down_end_indices) > 0:
-                    down_end_idx = down_end_indices[0]  # First point after peak dropping below low threshold
-                    downstroke2 = (fi[down1_idx] - fi[down_end_idx]) / (pi[down1_idx] - pi[down_end_idx]) # to keep it positive
-                else:
-                    downstroke2 = None
-            else:
-                stiffness = None
-                upstroke = None
-                downstroke1 = None
-                downstroke2 = None
-        else:
-            stiffness = None
-            upstroke = None
-            downstroke1 = None
-            downstroke2 = None
-    else:
-        stiffness = None
-        upstroke = None
-        downstroke1 = None
-        downstroke2 = None
-
-    # Hardness
-    # start_idx = np.where(fi >= 0.1)[0][0]
-    # stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
-    # idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
-    # idx2 = np.where(fi > 0.1)[0][0]  # First index where force > 0.1
-    # upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-    #
-    # idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
-    # idx2 = np.where(fi > 0.1)[0][-1]  # First index where force > 0.1
-    # downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-
-    offset = np.mean(ft[:5]) - np.mean(ft[:-10])
-
-    # PSD
-    freqs, psd = welch(ft, fs=1 / np.median(np.diff(time_i)))
-    power = np.mean(np.square(ft)) / (time_i[-1] - time_i[0])
-
-    psd_peak = freqs[np.argmax(psd)]
-
-    # Entropy of the Force Signal
-    try:
-        prob_dist = np.histogram(ft, bins=30, density=True)[
-            0]  # Probability distribution
-        prob_dist = prob_dist[prob_dist > 0]  # Remove zero probabilities
-        entropy = -np.sum(prob_dist * np.log2(
-            prob_dist))  # Shannon entropy => measure of randomness (estimation of fluctuations in the signal)
-    except Exception:
-        entropy = None
-
-    # NEW FEATURES
-
-    # 1. Initial Force Peak Characteristics
+    # Calculate key indices once - reuse them throughout
     force_max = np.max(fi)
     force_max_idx = np.argmax(fi)
-    time_to_max = time_i[force_max_idx] - time_i[0]
+    steady_state_start_idx = min(force_max_idx + int(len(fi) * 0.05), len(fi) - 101)
+    steady_state_force = np.mean(
+        fi[steady_state_start_idx:steady_state_start_idx + 100]) if steady_state_start_idx < len(fi) - 100 else np.mean(
+        fi[-100:])
 
-    # 2. Force Overshoot
-    steady_state_start_idx = force_max_idx + int(len(fi) * 0.05)  # Skip a bit after peak
-    steady_state_force = np.mean(fi[steady_state_start_idx:steady_state_start_idx + 100])
-    force_overshoot = (force_max - steady_state_force) / steady_state_force
-
-    # 3. Initial Peak Width
-    f_th = force_max
-    above_th = np.where(fi > f_th)[0]
-
-    if len(above_th) > 0:
-        peak_width = time_i[above_th[-1]] - time_i[above_th[0]]
-    else:
-        peak_width = None
-
-    # 5. Position Response Rate
-    # Calculate the rate of position change during initial loading
-    pos_rate = np.diff(pi[:force_max_idx + 1]) / np.diff(time_i[:force_max_idx + 1])
-    max_pos_rate = np.max(pos_rate) if len(pos_rate) > 0 else 0
-
-    # 6. Force Oscillation
-    # Calculate standard deviation in force during steady state as a measure of oscillations
-    steady_state_region = fi[steady_state_start_idx:steady_state_start_idx + 100]
-    force_oscillation = np.std(steady_state_region)
-
-    # 7. Force Relaxation Ratio - Captures material relaxation properties
-    if len(ft) > 100:
-        early_touch_force = np.mean(ft[10:30])  # Skip the first few points
-        late_touch_force = np.mean(ft[-30:])
-        force_relaxation = (early_touch_force - late_touch_force) / early_touch_force
-    else:
-        force_relaxation = 0
-
-    # 8. Initial Stiffness vs Later Stiffness (Stiffness Change)
-    # This can capture non-linear elastic behavior
-    if len(pi) > 100 and len(fi) > 100:
-
-        if np.any(fi >= 0.5 * force_max):
-            early_stiffness_idx = np.where(fi >= 0.5 * force_max)[0][0]
-            start_idx = np.where(fi >= 0.1 * force_max)[0][0]
-            early_stiffness = (fi[early_stiffness_idx] - fi[start_idx]) / (pi[early_stiffness_idx] - pi[start_idx])
-        else:
-            early_stiffness = None
-
-        if np.any(fi >= 0.8 * force_max):
-            late_stiffness_idx = np.where(fi >= 0.8 * force_max)[0][0]
-            late_stiffness = (force_max - fi[early_stiffness_idx]) / (pi[force_max_idx] - pi[late_stiffness_idx])
-        else:
-            late_stiffness = None
-
-        stiffness_ratio = late_stiffness / early_stiffness if (early_stiffness is not None and early_stiffness != 0 and late_stiffness is not None) else None
-    else:
-        stiffness_ratio = None
-
-    # Compute velocity and acceleration for jerk
+    # Calculate differences and derivatives once (reuse for multiple features)
+    dt = np.mean(np.diff(time_i))
     velocity = np.gradient(pi, time_i)
     acceleration = np.gradient(velocity, time_i)
     jerk = np.gradient(acceleration, time_i)
+
+    # Calculate force thresholds once
+    low_threshold = 0.1 * force_max
+    mid_threshold = 0.5 * force_max
+    high_threshold = 0.75 * force_max
+
+    # Force Decay Rate (τ)
+    decay_time = time_t - time_t[0]
+    decay_force = np.log(np.maximum(ft, 1e-10))  # Avoid log(0)
+    tau_result = linregress(decay_time, decay_force)
+    tau = -1 / tau_result.slope if tau_result.slope != 0 else None
+
+    # Steady-State Force
+    F_ss = steady_state_force
+    P_ss = np.mean(pt[-30:]) if len(pt) >= 30 else None
+
+    # Calculate stiffness using pre-computed thresholds
+    stiffness = None
+    upstroke = None
+    downstroke1 = None
+    downstroke2 = None
+
+    # Find indices efficiently
+    low_idx_up = np.where(fi >= low_threshold)[0]
+    mid_idx_up = np.where(fi >= mid_threshold)[0]
+    high_idx_up = np.where(fi >= high_threshold)[0]
+
+    post_peak_indices = np.where((fi <= high_threshold) & (np.arange(len(fi)) > force_max_idx))[0]
+    down_end_indices = np.where((fi <= low_threshold) & (np.arange(len(fi)) > force_max_idx))[0]
+
+    if len(low_idx_up) > 0:
+        up_start_idx = low_idx_up[0]
+
+        # Calculate stiffness
+        if pi[force_max_idx] != pi[up_start_idx]:
+            stiffness = (force_max - fi[up_start_idx]) / (pi[force_max_idx] - pi[up_start_idx])
+
+        # Calculate upstroke
+        if len(mid_idx_up) > 0:
+            mid_up_idx = mid_idx_up[0]
+            if pi[mid_up_idx] != pi[up_start_idx]:
+                upstroke = (fi[mid_up_idx] - fi[up_start_idx]) / (pi[mid_up_idx] - pi[up_start_idx])
+
+        # Calculate downstrokes
+        if len(post_peak_indices) > 0:
+            down1_idx = post_peak_indices[0]
+            if pi[force_max_idx] != pi[down1_idx]:
+                downstroke1 = (force_max - fi[down1_idx]) / (pi[force_max_idx] - pi[down1_idx])
+
+            if len(down_end_indices) > 0:
+                down_end_idx = down_end_indices[0]
+                if pi[down1_idx] != pi[down_end_idx]:
+                    downstroke2 = (fi[down1_idx] - fi[down_end_idx]) / (pi[down1_idx] - pi[down_end_idx])
+
+    # Calculate spectral features
+    # Use smaller segment size for faster calculation
+    freqs, psd = welch(ft, fs=1 / dt, nperseg=min(256, len(ft) // 4))
+    power = np.mean(np.square(ft)) / (time_i[-1] - time_i[0])
+    psd_peak = freqs[np.argmax(psd)] if len(psd) > 0 else None
+
+    # Entropy
+    # Use fewer bins for faster computation
+    hist, _ = np.histogram(ft, bins=20, density=True)
+    hist_positive = hist[hist > 0]
+    entropy = -np.sum(hist_positive * np.log2(hist_positive)) if len(hist_positive) > 0 else None
+
+    # Additional features
+    time_to_max = time_i[force_max_idx] - time_i[0]
+    force_overshoot = (force_max - F_ss) / F_ss if F_ss > 0 else 0
+
+    # Peak width (simplified)
+    above_th = np.where(fi > force_max * 0.9)[0]  # Use 90% of peak instead of exact peak
+    peak_width = time_i[above_th[-1]] - time_i[above_th[0]] if len(above_th) > 0 else None
+
+    # Position response rate
+    max_pos_rate = np.max(np.abs(velocity[:force_max_idx + 1])) if force_max_idx > 0 else 0
+
+    # Force oscillation
+    force_oscillation = np.std(fi[steady_state_start_idx:steady_state_start_idx + 100]) if steady_state_start_idx < len(
+        fi) - 100 else np.std(fi[-100:])
+
+    # Force relaxation
+    if len(ft) > 100:
+        force_relaxation = (force_max - np.mean(ft[-50:])) / force_max if force_max > 0 else 0
+    else:
+        force_relaxation = 0
+
+    # Position relaxation
+    if len(pt) > 100:
+        early_touch_position = pi[force_max_idx]
+        late_touch_position = np.mean(pt[-50:])
+        position_relaxation = (early_touch_position - late_touch_position) / early_touch_position if early_touch_position != 0 else 0
+    else:
+        position_relaxation = 0
+
+    # Stiffness ratio (calculate once)
+    stiffness_ratio = None
+    if len(pi) > 100 and len(fi) > 100:
+        # Early stiffness
+        early_stiffness = None
+        if np.any(fi >= 0.5 * force_max):
+            early_idx = np.where(fi >= 0.5 * force_max)[0][0]
+            start_idx = np.where(fi >= 0.1 * force_max)[0][0]
+            if pi[early_idx] != pi[start_idx]:
+                early_stiffness = (fi[early_idx] - fi[start_idx]) / (pi[early_idx] - pi[start_idx])
+
+        # Late stiffness
+        late_stiffness = None
+        if np.any(fi >= 0.8 * force_max):
+            late_idx = np.where(fi >= 0.8 * force_max)[0][0]
+            if pi[force_max_idx] != pi[late_idx]:
+                late_stiffness = (force_max - fi[late_idx]) / (pi[force_max_idx] - pi[late_idx])
+
+        if early_stiffness and late_stiffness and early_stiffness != 0:
+            stiffness_ratio = late_stiffness / early_stiffness
+
+    # Max jerk (already computed)
     jerk_max = np.max(np.abs(jerk))
 
     # Force/position RMS
     force_rms = np.sqrt(np.mean(np.square(fi)))
     position_rms = np.sqrt(np.mean(np.square(pi)))
 
-    # Zero-crossings
+    # Zero-crossings (simplified)
     zero_crossings_force = np.sum(np.diff(np.signbit(fi - np.mean(fi))))
     zero_crossings_position = np.sum(np.diff(np.signbit(pi - np.mean(pi))))
 
-    # Damping coefficient (Kelvin-Voigt model)
+    # Damping coefficient (optimized to avoid singular matrix errors)
     try:
         A = np.vstack([pi, velocity]).T
-        el, c = np.linalg.lstsq(A, fi, rcond=None)[0]
-        damping_coefficient = c
-        elastic_coefficient = el
+        coeffs, _, _, _ = np.linalg.lstsq(A, fi, rcond=1e-10)
+        elastic_coefficient, damping_coefficient = coeffs
     except:
-        damping_coefficient = None
-        elastic_coefficient = None
+        elastic_coefficient, damping_coefficient = None, None
 
-    # Spectral features from FFT
-    n = len(fi)
-    fi_fft = fft(fi)
-    pi_fft = fft(pi)
-    dt = np.mean(np.diff(time_i))
+    # Spectral features (FFT) - Use a power of 2 for faster FFT
+    n = 2 ** int(np.log2(len(fi)))
+    fi_fft = fft(fi[:n])
+    pi_fft = fft(pi[:n])
     freq = fftfreq(n, dt)[:n // 2]
     fi_mag = np.abs(fi_fft)[:n // 2]
     pi_mag = np.abs(pi_fft)[:n // 2]
@@ -268,260 +234,183 @@ def extract_features(data):
     spectral_entropy_force = -np.sum(fi_mag_norm_pos * np.log2(fi_mag_norm_pos)) if len(fi_mag_norm_pos) > 0 else 0
     spectral_entropy_position = -np.sum(pi_mag_norm_pos * np.log2(pi_mag_norm_pos)) if len(pi_mag_norm_pos) > 0 else 0
 
-    # Impedance ratio
+    # Impedance ratio (low frequency)
+    impedance_ratio_lowfreq = None
     low_freq_idx = (freq < 10) & (freq > 0)
     if np.any(low_freq_idx) and np.any(pi_mag[low_freq_idx] > 0):
-        impedance_ratio_lowfreq = np.mean(fi_mag[low_freq_idx] / pi_mag[low_freq_idx])
-    else:
-        impedance_ratio_lowfreq = None
+        impedance_ratio_lowfreq = np.mean(fi_mag[low_freq_idx] / np.maximum(pi_mag[low_freq_idx], 1e-10))
 
-    # Spectral coherence
-    if len(fi) > 0 and len(pi) > 0:
-        fs = 1.0 / np.mean(dt)
-        f, Cxy = coherence(fi, pi, fs=fs, nperseg=min(256, len(fi) // 4))
+    # Spectral coherence (optimized)
+    coherence_LF = None
+    coherence_HF = None
+    if len(fi) > 128:
+        f, Cxy = coherence(fi, pi, fs=1 / dt, nperseg=min(128, len(fi) // 4))
         low_freq_idx = f < 10
         high_freq_idx = f > 50
-        coherence_LF = np.mean(Cxy[low_freq_idx])
-        coherence_HF = np.mean(Cxy[high_freq_idx])
-    else:
-        coherence_LF = None
-        coherence_HF = None
+        if np.any(low_freq_idx):
+            coherence_LF = np.mean(Cxy[low_freq_idx])
+        if np.any(high_freq_idx):
+            coherence_HF = np.mean(Cxy[high_freq_idx])
 
-    # Wavelet Transform Energy Features
+    # Wavelet features
+    wavelet_relative_energies = [None] * 5
     try:
-        coeffs = pywt.wavedec(fi, 'db4', level=4)
-        wavelet_energies = [np.sum(np.square(c)) for c in coeffs]
-        wavelet_energy_total = np.sum(wavelet_energies)
-        wavelet_relative_energies = [e / wavelet_energy_total for e in wavelet_energies]
-    except Exception:
-        wavelet_relative_energies = [None] * 5
+        from pywt import wavedec
+        coeffs = wavedec(fi, 'db4', level=5)
+        energies = [np.sum(np.square(c)) for c in coeffs]
+        total_energy = sum(energies)
+        if total_energy > 0:
+            wavelet_relative_energies = [e / total_energy for e in energies]
+            while len(wavelet_relative_energies) < 5:
+                wavelet_relative_energies.append(0)
+            wavelet_relative_energies = wavelet_relative_energies[:5]
+    except:
+        pass
 
-    # STFT Feature
+    # STFT feature calculation
+    stft_mean_freq = None
     try:
-        f_stft, t_stft, Zxx = stft(fi, fs=1.0 / dt)
-        stft_magnitude = np.abs(Zxx)
-        stft_mean_freq = np.sum(f_stft * np.mean(stft_magnitude, axis=1)) / np.sum(np.mean(stft_magnitude, axis=1))
-    except Exception:
-        stft_mean_freq = None
+        from scipy.signal import stft
+        f, t, Zxx = stft(fi, fs=1 / dt, nperseg=min(256, len(fi) // 4))
+        magnitude = np.abs(Zxx)
+        max_freq_indices = np.argmax(magnitude, axis=0)
+        frequencies = f[max_freq_indices]
+        stft_mean_freq = np.mean(frequencies)
+    except:
+        pass
 
-    # EMD Feature
+    # EMD features
+    imf_energy = [None, None, None]
     try:
+        from PyEMD import EMD
         emd = EMD()
         imfs = emd(fi)
-        imf_energy = [np.sum(imf ** 2) for imf in imfs[:3]]
-    except Exception:
-        imf_energy = [None, None, None]
+        imf_energy = []
+        for i in range(min(3, len(imfs))):
+            imf_energy.append(np.sum(np.square(imfs[i])))
+        while len(imf_energy) < 3:
+            imf_energy.append(0)
+    except:
+        pass
 
-    # Contact Area Estimation using Hertz Model
-    R = 0.005  # Estimated radius in meters (~5 mm) — assumed
-    nu = 0.5  # Typical Poisson's ratio for elastomers
-    contact_area = np.pi * ((3 * (1 - nu ** 2) * force_max * R / (4 * stiffness)) ** (
-                2 / 3)) if stiffness and stiffness > 0 else None
 
-    # Adhesion Energy
+    # Contact area estimation
+    contact_area = None
+    if stiffness and stiffness > 0:
+        R = 0.005  # Estimated radius in meters
+        nu = 0.5  # Typical Poisson's ratio
+        contact_area = np.pi * ((3 * (1 - nu ** 2) * force_max * R / (4 * stiffness)) ** (2 / 3))
+
+    # Adhesion energy
+    adhesion_energy = None
     try:
         retraction_force = fi[force_max_idx:]
         retraction_position = pi[force_max_idx:]
-        adhesion_energy = -np.trapz(retraction_force, retraction_position)
-    except Exception:
-        adhesion_energy = None
-
-    # Viscoelastic Models for fitting
-    def kelvin_voigt_model(t, E, eta):
-        return F_ss * (1 - np.exp(-E * t / eta))
-
-    def maxwell_model(t, E, eta):
-        return F_ss * np.exp(-E * t / eta)
-
-    def standard_linear_solid_model(t, E1, E2, eta):
-        return F_ss * (1 - (E2 / (E1 + E2)) * np.exp(-((E1 + E2) / eta) * t))
-    relax_time = time_t - time_t[0]
-    relax_force = ft
-
-    # Initialize defaults
-    kv_E, kv_eta = None, None
-    mw_E, mw_eta = None, None
-    sls_E1, sls_E2, sls_eta = None, None, None
-
-    try:
-        # Kelvin-Voigt
-        result  = curve_fit(kelvin_voigt_model, relax_time, relax_force, p0=[1, 1], maxfev=5000)
-        popt_kv = result[0]
-        kv_E, kv_eta = popt_kv
-    except:
-        pass
-
-    try:
-        # Maxwell
-        result = curve_fit(maxwell_model, relax_time, relax_force, p0=[1, 1], maxfev=5000)
-        popt_mw = result[0]
-        mw_E, mw_eta = popt_mw
-    except:
-        pass
-
-    try:
-        # SLS
-        result = curve_fit(standard_linear_solid_model, relax_time, relax_force, p0=[1, 1, 1], maxfev=5000)
-        popt_sls = result[0]
-        sls_E1, sls_E2, sls_eta = popt_sls
+        adhesion_energy = -np.trapezoid(retraction_force, retraction_position)
     except:
         pass
 
     # Force peak-to-peak
-    try:
-        force_ptp = np.ptp(fi)
-    except:
-        force_ptp = np.nan
+    force_ptp = np.ptp(fi)
 
     # Position peak-to-peak
-    try:
-        position_ptp = np.ptp(pi)
-    except:
-        position_ptp = np.nan
+    position_ptp = np.ptp(pi)
 
     # Load duration calculation
-    try:
-        load_duration = time_i[force_max_idx] - time_i[0]
-    except:
-        load_duration = np.nan
+    load_duration = time_i[force_max_idx] - time_i[0]
 
     # Unload duration calculation
-    try:
-        unload_duration = time_i[-1] - time_i[force_max_idx]
-    except:
-        unload_duration = np.nan
+    unload_duration = time_i[-1] - time_i[force_max_idx]
 
     # Load/unload ratio
-    try:
-        load_unload_ratio = load_duration / unload_duration if unload_duration > 0 else np.nan
-    except:
-        load_unload_ratio = np.nan
+    load_unload_ratio = load_duration / unload_duration if unload_duration > 0 else None
 
     # Loading slope
-    try:
-        loading_slope = (fi[force_max_idx] - fi[0]) / (pi[force_max_idx] - pi[0])
-    except:
-        loading_slope = np.nan
+    loading_slope = (fi[force_max_idx] - fi[0]) / (pi[force_max_idx] - pi[0]) if pi[force_max_idx] != pi[0] else None
 
     # Unloading slope
-    try:
-        unloading_slope = (fi[-1] - fi[force_max_idx]) / (pi[-1] - pi[force_max_idx])
-    except:
-        unloading_slope = np.nan
+    unloading_slope = (fi[-1] - fi[force_max_idx]) / (pi[-1] - pi[force_max_idx]) if pi[-1] != pi[
+        force_max_idx] else None
 
     # Slope symmetry
-    try:
-        slope_symmetry = loading_slope / abs(unloading_slope) if unloading_slope != 0 else np.nan
-    except:
-        slope_symmetry = np.nan
+    slope_symmetry = loading_slope / abs(unloading_slope) if unloading_slope and unloading_slope != 0 else None
 
-    # First derivative
+    # Curvature peak
+    curvature_peak = None
     try:
         d1 = np.gradient(fi, pi)
-    except:
-        d1 = np.nan
-
-    # Second derivative
-    try:
         d2 = np.gradient(d1, pi)
         curvature_peak = d2[force_max_idx]
     except:
-        d2 = np.nan
-        curvature_peak = np.nan
+        pass
 
     # Log-log slope calculation
+    slope_log_log = None
     try:
-        mask = pi > 0
-        log_pi = np.log10(pi[mask])
-        log_fi = np.log10(fi[mask])
-        slope_log_log, _, _, _, _ = linregress(log_pi, log_fi)
+        try:
+            mask = pi > 0
+            log_pi = np.log10(np.maximum(pi[mask], 1e-10))
+            log_fi = np.log10(np.maximum(fi[mask], 1e-10))
+            if len(log_pi) > 2:
+                result = linregress(log_pi, log_fi)
+                slope_log_log = result.slope
+            else:
+                pass
+        except:
+            pass
     except:
-        slope_log_log = np.nan
+        pass
 
-    # Hjorth parameters on fi
-    try:
-        activity = np.var(fi)
-    except:
-        activity = np.nan
+    # Hjorth parameters
+    activity = np.var(fi)
+    mobility = np.sqrt(np.var(np.diff(fi)) / activity) if activity > 0 else None
+    complexity_value = np.sqrt(np.var(np.diff(np.diff(fi))) / np.var(np.diff(fi))) / mobility if mobility and np.var(
+        np.diff(fi)) > 0 else None
 
-    try:
-        mobility = np.sqrt(np.var(np.diff(fi)) / activity)
-    except:
-        mobility = np.nan
+    # Skip computationally expensive fractal calculations
+    hfd = None
+    katz_fd = None
 
+    # Simplified Hurst exponent
+    hurst_exp = None
     try:
-        complexity_value = np.sqrt(np.var(np.diff(np.diff(fi))) / np.var(np.diff(fi))) / mobility
+        N = len(fi)
+        Y = np.cumsum(fi - np.mean(fi))
+        R = np.max(Y) - np.min(Y)
+        S = np.std(fi)
+        if S > 0:
+            hurst_exp = np.log(R / S) / np.log(N)
     except:
-        complexity_value = np.nan
+        pass
 
-    # Fractal dimensions
+    # Teager-Kaiser Energy Operator (simplified)
+    tkeo_mean = None
     try:
-        hfd, _ = complexity.fractal_higuchi(fi, k_max='default')
+        tkeo = fi[1:-1] ** 2 - fi[:-2] * fi[2:]
+        tkeo_mean = np.mean(tkeo)
     except:
-        hfd = np.nan
-
-    try:
-        katz_fd = complexity.fractional_dimension_katz(fi)
-    except:
-        katz_fd = np.nan
-
-    # Hurst exponent
-    def hurst(ts):
-            N = len(ts)
-            T = np.arange(1, N + 1)
-            Y = np.cumsum(ts - np.mean(ts))
-            R = np.max(Y) - np.min(Y)
-            S = np.std(ts)
-            return np.log(R / S) / np.log(N)
-    try:
-        hurst_exp = hurst(fi)
-    except:
-        hurst_exp = np.nan
-
-    # Lyapunov exponent calculation
-    try:
-        eps = 1e-3
-        lyap_vals = []
-        for i in range(len(fi)):
-            for j in range(i + 1, len(fi)):
-                if abs(fi[i] - fi[j]) < eps:
-                    for k in range(1, min(len(fi) - i, len(fi) - j)):
-                        d0 = abs(fi[i] - fi[j])
-                        dn = abs(fi[i + k] - fi[j + k])
-                        if d0 > 0 and dn > 0:
-                            lyap_vals.append(np.log(dn / d0))
-        lyapunov_exp = np.mean(lyap_vals) if lyap_vals else np.nan
-    except:
-        lyapunov_exp = np.nan
-
-    # Teager-Kaiser Energy Operator
-    try:
-        tkeo = fi ** 2
-        tkeo[1:-1] -= fi[:-2] * fi[2:]
-        tkeo_mean = np.mean(tkeo[1:-1])
-    except:
-        tkeo_mean = np.nan
+        pass
 
     # Correlation between force and position
-    try:
-        correlation_fp = correlation(fi, pi)
-    except:
-        correlation_fp = np.nan
+    correlation_fp = np.corrcoef(fi, pi)[0, 1] if len(fi) > 1 and len(pi) > 1 else None
 
-    # Return all features
-    return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1,downstroke2, fi, pi, time_i, P_ss, offset,
+    # Calculate peak ratio
+    peak_ratio = force_max / np.max(pi) if np.max(pi) > 0 else None
+
+    # Return all features in the original tuple format
+    return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1, downstroke2, fi, pi, time_i, P_ss,
             force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
             force_oscillation, force_relaxation, stiffness_ratio,
             jerk_max, zero_crossings_force, zero_crossings_position,
             force_rms, position_rms, damping_coefficient,
             spectral_centroid_force, spectral_entropy_force,
             spectral_centroid_position, spectral_entropy_position,
-            impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient,  contact_area, adhesion_energy, wavelet_relative_energies, stft_mean_freq, imf_energy,
-            kv_E, kv_eta, mw_E, mw_eta, sls_E1, sls_E2, sls_eta, force_ptp, position_ptp, load_duration, unload_duration, load_unload_ratio,
-            loading_slope, unloading_slope, slope_symmetry, curvature_peak,
+            impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient, contact_area, adhesion_energy,
+            wavelet_relative_energies, stft_mean_freq, imf_energy, force_ptp, position_ptp, load_duration,
+            unload_duration,
+            load_unload_ratio, loading_slope, unloading_slope, slope_symmetry, curvature_peak,
             slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
-            hurst_exp, lyapunov_exp, tkeo_mean, correlation_fp
-            )
+            hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation)
 
 def extract_curve_features(position, force):
     features = {}
@@ -532,6 +421,7 @@ def extract_curve_features(position, force):
 
     # --- 2. Hysteresis area ---
     # Ensure the curve is closed (append first point if necessary)
+    hysteresis_area = np.nan
     if not np.array_equal(position[0], position[-1]) or not np.array_equal(force[0], force[-1]):
         position_closed = np.append(position, position[0])
         force_closed = np.append(force, force[0])
@@ -544,7 +434,7 @@ def extract_curve_features(position, force):
         features['hysteresis_area'] = hysteresis_area
 
     # --- 3. Loading energy (area under loading curve) ---
-    loading_energy = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
+    loading_energy = np.trapezoid(force[:peak_idx + 1], position[:peak_idx + 1])
     features['loading_energy'] = loading_energy
 
     # --- 4. Loading nonlinearity ---
@@ -559,8 +449,8 @@ def extract_curve_features(position, force):
 
     # --- 5. Loading-to-unloading area ratio ---
     if peak_idx > 10 and peak_idx < len(position) - 10:
-        loading_area = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
-        unloading_area = np.trapz(force[peak_idx:], position[peak_idx:])
+        loading_area = np.trapezoid(force[:peak_idx + 1], position[:peak_idx + 1])
+        unloading_area = np.trapezoid(force[peak_idx:], position[peak_idx:])
         features['loading_unloading_area_ratio'] = loading_area / abs(unloading_area) if unloading_area != 0 else np.nan
     else:
         features['loading_unloading_area_ratio'] = np.nan
@@ -669,7 +559,7 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
         'poly4_coef0', 'poly4_coef1', 'poly4_coef2', 'poly4_coef3', 'poly4_coef4',
         'poly5_coef0', 'poly5_coef1', 'poly5_coef2', 'poly5_coef3', 'poly5_coef4',
         'segment2_slope', 'segment3_slope', 'segment2_force_std', 'segment3_force_std',
-        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient'
+        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient','strain_energy_density','energy_dissipation_ratio'
     ]
 
     # Initialize the hysteresis feature columns if they don't exist
@@ -708,12 +598,14 @@ def compute_spatial_and_surface_features(df):
     width = maxx - minx + 1
     height = maxy - miny + 1
 
+    # Create a list of features to analyze
+    features_list = ['Stiffness', 'Upstroke', 'Downstroke1','Downstroke2','Tau','time_to_max']
     # Get the set of points that actually exist in the data
     existing_points = set(zip(df['posx'].astype(int), df['posy'].astype(int)))
 
     # Create grids for spatial analysis with interpolation for calculations
     grids = {}
-    for feature in ['Stiffness', 'Upstroke', 'Downstroke1','Downstroke2','Tau','time_to_max']:
+    for feature in features_list:
         # Create initial grid with NaN values
         grid = np.full((height, width), np.nan)
 
@@ -732,12 +624,19 @@ def compute_spatial_and_surface_features(df):
     for _, row in df.iterrows():
         x, y = int(row['posx']) - minx, int(row['posy']) - miny
         if 0 <= x < width and 0 <= y < height:
-            pi = np.array(row['Pi'])
-            if len(pi) > 0:
-                position_grid[y, x] = pi[-20]
+            position_grid[y, x] = row['P_ss']
 
     # Interpolate missing values in position grid
     filled_position_grid = interpolate_missing_values(position_grid)
+
+    # Compute all needed gradients and laplacians
+    sobel_gx = {}
+    sobel_gy = {}
+    laplacians = {}
+    for feature in features_list:
+        sobel_gx[feature] = sobel(grids[feature], axis=1)
+        sobel_gy[feature] = sobel(grids[feature], axis=0)
+        laplacians[feature] = laplace(grids[feature])
 
     # Prepare depth map for LBP
     Stiffness_LBP_map = grids['Stiffness']
@@ -1013,7 +912,7 @@ def compute_spatial_and_surface_features(df):
                 y_min, y_max = max(0, y - 1), min(height - 1, y + 1) + 1
 
                 # Extract patches
-                for feature in ['Stiffness', 'Upstroke', 'Downstroke1','Downstroke2','Tau','time_to_max']:
+                for feature in features_list:
                     patch = grids[feature][y_min:y_max, x_min:x_max].flatten()
                     patch = patch[~np.isnan(patch)]
                     if len(patch) > 0:
@@ -1032,22 +931,77 @@ def compute_spatial_and_surface_features(df):
                         # Local range (max - min)
                         df.at[idx, f'local_range_{feature}'] = np.ptp(patch)
 
-                # Gradient norm - use central differences where possible
-                if 0 < x < width - 1:
-                    gx = (grids['Stiffness'][y, x + 1] - grids['Stiffness'][y, x - 1]) / 2
-                elif x == 0:
-                    gx = grids['Stiffness'][y, x + 1] - grids['Stiffness'][y, x]
-                else:  # x == width - 1
-                    gx = grids['Stiffness'][y, x] - grids['Stiffness'][y, x - 1]
+                    # Gradient norm - use central differences where possible
+                    if 0 < x < width - 1:
+                        gx = (grids[feature][y, x + 1] - grids[feature][y, x - 1]) / 2
+                    elif x == 0:
+                        gx = grids[feature][y, x + 1] - grids[feature][y, x]
+                    else:  # x == width - 1
+                        gx = grids[feature][y, x] - grids[feature][y, x - 1]
 
-                if 0 < y < height - 1:
-                    gy = (grids['Stiffness'][y + 1, x] - grids['Stiffness'][y - 1, x]) / 2
-                elif y == 0:
-                    gy = grids['Stiffness'][y + 1, x] - grids['Stiffness'][y, x]
-                else:  # y == height - 1
-                    gy = grids['Stiffness'][y, x] - grids['Stiffness'][y - 1, x]
+                    if 0 < y < height - 1:
+                        gy = (grids[feature][y + 1, x] - grids[feature][y - 1, x]) / 2
+                    elif y == 0:
+                        gy = grids[feature][y + 1, x] - grids[feature][y, x]
+                    else:  # y == height - 1
+                        gy = grids[feature][y, x] - grids[feature][y - 1, x]
 
-                df.at[idx, 'local_gradient_norm_stiffness'] = np.sqrt(gx ** 2 + gy ** 2)
+                    df.at[idx, f'local_gradient_norm_{feature}'] = np.sqrt(gx ** 2 + gy ** 2)
+
+                    # Compute features from Sobel gradients
+                    gradient_magnitude = np.sqrt(sobel_gx[feature][y,x] ** 2 + sobel_gy[feature][y,x] ** 2)
+                    gradient_direction = np.arctan2(sobel_gy[feature][y,x], sobel_gx[feature][y,x])
+
+                    # Store the point-specific gradient information
+                    df.at[idx, f'sobel_gradient_magnitude_{feature}'] = gradient_magnitude
+                    df.at[idx, f'sobel_gradient_direction_{feature}'] = gradient_direction
+
+                    # Assign Laplacian value
+                    df.at[idx, f'laplacian_{feature}'] = laplacians[feature][y,x]
+
+                # Extract HOG features in local region
+                hog_region_size = 7
+                y_min_hog = max(0, y - hog_region_size // 2)
+                y_max_hog = min(height - 1, y + hog_region_size // 2) + 1
+                x_min_hog = max(0, x - hog_region_size // 2)
+                x_max_hog = min(width - 1, x + hog_region_size // 2) + 1
+
+                hog_region = grids['Stiffness'][y_min_hog:y_max_hog, x_min_hog:x_max_hog]
+                # Fill NaN values for HOG calculation
+                if np.any(np.isnan(hog_region)):
+                    hog_region = np.nan_to_num(hog_region, nan=np.nanmean(hog_region))
+
+                if hog_region.shape[0] >= 3 and hog_region.shape[1] >= 3:  # Minimum size check for HOG
+                    # Normalize region for HOG
+                    hog_region = (hog_region - np.min(hog_region)) / (np.ptp(hog_region) + 1e-10)
+
+                    try:
+                        hog_features, hog_image = hog(
+                            hog_region,
+                            orientations=8,
+                            pixels_per_cell=(2, 2),
+                            cells_per_block=(1, 1),
+                            visualize=True,
+                            feature_vector=True
+                        )
+
+                        # Store top 3 orientation bins from HOG
+                        if len(hog_features) > 0:
+                            top_hog_bins = np.argsort(hog_features)[-3:]
+                            for i, bin_idx in enumerate(top_hog_bins):
+                                df.at[idx, f'hog_bin{i + 1}'] = bin_idx
+                                df.at[idx, f'hog_val{i + 1}'] = hog_features[bin_idx]
+
+                            # Store overall HOG strength
+                            df.at[idx, 'hog_mean'] = np.mean(hog_features)
+                            df.at[idx, 'hog_std'] = np.std(hog_features)
+                    except Exception:
+                        # Fallback if HOG fails
+                        for i in range(3):
+                            df.at[idx, f'hog_bin{i + 1}'] = np.nan
+                            df.at[idx, f'hog_val{i + 1}'] = np.nan
+                        df.at[idx, 'hog_mean'] = np.nan
+                        df.at[idx, 'hog_std'] = np.nan
 
                 # Deviation from global mean
                 df.at[idx, 'stiffness_deviation_from_global'] = grids['Stiffness'][y, x] - global_mean_stiffness
@@ -1094,7 +1048,192 @@ def compute_spatial_and_surface_features(df):
                     df.at[idx, f'lbp_std_P{P}_R{R}'] = np.std(local_lbp)
                     df.at[idx, f'lbp_entropy_P{P}_R{R}'] = -np.sum(hist[hist > 0] * np.log2(hist[hist > 0]))
 
-                # LOCAL SURFACE METRICS - multiple window sizes (USING STIFFNESS)
+                # Compute structure tensors for directional information
+                # Reuse gx, gy from gradient calculations or sobel_gx, sobel_gy
+                s_xx = sobel_gx[feature][y,x] * sobel_gx[feature][y,x]
+                s_xy = sobel_gx[feature][y,x] * sobel_gy[feature][y,x]
+                s_yy = sobel_gy[feature][y,x] * sobel_gy[feature][y,x]
+
+                # Calculate eigenvalues of structure tensor
+                tensor_trace = s_xx + s_yy
+                tensor_det = s_xx * s_yy - s_xy * s_xy
+                discriminant = np.sqrt(max(0, (tensor_trace ** 2) / 4 - tensor_det))
+                lambda1 = tensor_trace / 2 + discriminant
+                lambda2 = tensor_trace / 2 - discriminant
+
+                # Compute coherence and orientation from structure tensor
+                if (lambda1 + lambda2) > 0:
+                    coherence = (lambda1 - lambda2) / (lambda1 + lambda2)
+                else:
+                    coherence = 0
+
+                orientation = 0.5 * np.arctan2(2 * s_xy, s_xx - s_yy) if s_xx != s_yy else np.pi / 4
+
+                df.at[idx, 'structure_tensor_coherence'] = coherence
+                df.at[idx, 'structure_tensor_orientation'] = orientation
+                df.at[idx, 'structure_tensor_lambda1'] = lambda1
+                df.at[idx, 'structure_tensor_lambda2'] = lambda2
+
+                # Phase congruency approximation (simplified for computational efficiency)
+                # Use multiple window sizes to capture different scales
+                for window_size in [3, 5, 7]:
+                    half_win = window_size // 2
+                    y_min_pc = max(0, y - half_win)
+                    y_max_pc = min(height - 1, y + half_win) + 1
+                    x_min_pc = max(0, x - half_win)
+                    x_max_pc = min(width - 1, x + half_win) + 1
+
+                    patch = grids['Stiffness'][y_min_pc:y_max_pc, x_min_pc:x_max_pc]
+                    if np.any(np.isnan(patch)):
+                        patch = np.nan_to_num(patch, nan=np.nanmean(patch))
+
+                    if patch.size > 1:
+                        # Compute gradients in the patch
+                        patch_gx = sobel(patch, axis=1)
+                        patch_gy = sobel(patch, axis=0)
+                        patch_gmag = np.sqrt(patch_gx ** 2 + patch_gy ** 2)
+
+                        # Simple phase congruency metric - ratio of edge energy to total energy
+                        total_energy = np.sum(np.abs(patch)) + 1e-10
+                        edge_energy = np.sum(patch_gmag) + 1e-10
+                        phase_congruency = edge_energy / total_energy
+
+                        df.at[idx, f'phase_congruency_w{window_size}'] = phase_congruency
+
+                # Distance-weighted relationship features
+                # Define feature differences with neighboring points
+                directions = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+                feature_diffs = np.zeros(len(directions))
+                dist_weights = np.zeros(len(directions))
+
+                for i, (dy, dx) in enumerate(directions):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width:
+                        center_val = grids['Stiffness'][y, x]
+                        neighbor_val = grids['Stiffness'][ny, nx]
+                        if not np.isnan(center_val) and not np.isnan(neighbor_val):
+                            feature_diffs[i] = abs(center_val - neighbor_val)
+                            # Inverse distance as weight
+                            dist_weights[i] = 1.0 / np.sqrt(dx ** 2 + dy ** 2)
+
+                # Normalize weights
+                if np.sum(dist_weights) > 0:
+                    dist_weights = dist_weights / np.sum(dist_weights)
+
+                # Compute weighted differences
+                weighted_diff = np.sum(feature_diffs * dist_weights)
+                df.at[idx, 'distance_weighted_diff'] = weighted_diff
+
+                # Boundary likelihood based on feature differentials
+                # Higher values indicate higher likelihood of being at a boundary
+                max_diff = np.max(feature_diffs)
+                boundary_likelihood = max_diff / (np.mean(grids['Stiffness']) + 1e-10)
+                df.at[idx, 'boundary_likelihood'] = boundary_likelihood
+
+                # Multi-scale edge response features
+                for scale in [1, 2, 3]:
+                    # Define kernel size based on scale
+                    kernel_size = 2 * scale + 1
+
+                    # Skip if kernel would extend beyond grid
+                    if (y - scale < 0 or y + scale >= height or
+                            x - scale < 0 or x + scale >= width):
+                        df.at[idx, f'edge_response_scale{scale}'] = np.nan
+                        continue
+
+                    # Extract and process sub-grid at this scale
+                    sub_grid = grids['Stiffness'][y - scale:y + scale + 1, x - scale:x + scale + 1]
+
+                    # Skip if sub_grid contains NaN values
+                    if np.any(np.isnan(sub_grid)):
+                        df.at[idx, f'edge_response_scale{scale}'] = np.nan
+                        continue
+
+                    # Compute Sobel response at this scale
+                    sub_gx = sobel(sub_grid, axis=1)
+                    sub_gy = sobel(sub_grid, axis=0)
+                    edge_response = np.sqrt(sub_gx[scale, scale] ** 2 + sub_gy[scale, scale] ** 2)
+
+                    df.at[idx, f'edge_response_scale{scale}'] = edge_response
+
+                # Local Contrast Normalization
+                # Multi-scale contrast features with different window sizes
+                for window_size in [3, 5, 7, 9]:
+                    half_win = window_size // 2
+
+                    # Define window boundaries with bounds checking
+                    y_min_win = max(0, y - half_win)
+                    y_max_win = min(height - 1, y + half_win) + 1
+                    x_min_win = max(0, x - half_win)
+                    x_max_win = min(width - 1, x + half_win) + 1
+
+                    # Process multiple features
+                    for feature in features_list:
+                        patch = grids[feature][y_min_win:y_max_win, x_min_win:x_max_win]
+                        valid_patch = patch[~np.isnan(patch)]
+
+                        if len(valid_patch) > 0:
+                            # Local contrast (max-min range normalized)
+                            local_range = np.max(valid_patch) - np.min(valid_patch)
+                            if local_range > 0:
+                                range_norm_value = (grids[feature][y, x] - np.min(valid_patch)) / local_range
+                                df.at[idx, f'{feature}_range_norm_w{window_size}'] = range_norm_value
+                            else:
+                                df.at[idx, f'{feature}_range_norm_w{window_size}'] = 0
+
+                # Center-surround differences at multiple scales
+                for center_size in [1, 2]:
+                    for surround_size in [3, 5]:
+                        if surround_size <= center_size:
+                            continue
+
+                        # Define center region
+                        y_min_center = max(0, y - center_size)
+                        y_max_center = min(height - 1, y + center_size) + 1
+                        x_min_center = max(0, x - center_size)
+                        x_max_center = min(width - 1, x + center_size) + 1
+
+                        # Define surround region
+                        y_min_surr = max(0, y - surround_size)
+                        y_max_surr = min(height - 1, y + surround_size) + 1
+                        x_min_surr = max(0, x - surround_size)
+                        x_max_surr = min(width - 1, x + surround_size) + 1
+
+                        # Process for stiffness feature
+                        center_patch = grids['Stiffness'][y_min_center:y_max_center, x_min_center:x_max_center]
+                        valid_center = center_patch[~np.isnan(center_patch)]
+
+                        # Create mask for surround (excluding center)
+                        surround_patch = grids['Stiffness'][y_min_surr:y_max_surr, x_min_surr:x_max_surr]
+                        center_mask = np.zeros_like(surround_patch, dtype=bool)
+                        center_mask[
+                        y_min_center - y_min_surr:y_max_center - y_min_surr,
+                        x_min_center - x_min_surr:x_max_center - x_min_surr
+                        ] = True
+
+                        surround_values = surround_patch[~center_mask]
+                        valid_surround = surround_values[~np.isnan(surround_values)]
+
+                        if len(valid_center) > 0 and len(valid_surround) > 0:
+                            center_mean = np.mean(valid_center)
+                            surround_mean = np.mean(valid_surround)
+
+                            # Center-surround difference
+                            cs_diff = center_mean - surround_mean
+                            df.at[idx, f'center_surround_diff_c{center_size}_s{surround_size}'] = cs_diff
+
+                            # Center-surround ratio
+                            if surround_mean != 0:
+                                cs_ratio = center_mean / surround_mean
+                                df.at[idx, f'center_surround_ratio_c{center_size}_s{surround_size}'] = cs_ratio
+                            else:
+                                df.at[idx, f'center_surround_ratio_c{center_size}_s{surround_size}'] = np.nan
+
+                            # Center-surround contrast
+                            cs_contrast = abs(center_mean - surround_mean) / (center_mean + surround_mean + 1e-10)
+                            df.at[idx, f'center_surround_contrast_c{center_size}_s{surround_size}'] = cs_contrast
+
+                # LOCAL SURFACE METRICS - multiple window sizes
                 window_sizes = [3, 5, 7]  # 3x3, 5x5, 7x7 windows
 
                 for window_size in window_sizes:
@@ -1287,34 +1426,82 @@ def compute_spatial_and_surface_features(df):
 
 def interpolate_missing_values(grid):
     """
-    Interpolate missing values in a grid using nearest neighbor interpolation.
+    Optimized version of interpolate_missing_values.
     """
-    # Check if the grid has any non-NaN values
-    if np.all(np.isnan(grid)):
+    # Quick check if interpolation is needed
+    if not np.any(np.isnan(grid)) or np.all(np.isnan(grid)):
         return grid.copy()
 
     # Get coordinates of non-NaN values
     y_indices, x_indices = np.where(~np.isnan(grid))
-    valid_points = np.column_stack((x_indices, y_indices))
-    valid_values = grid[y_indices, x_indices]
 
-    # Create grid coordinates for interpolation
-    y_grid, x_grid = np.mgrid[0:grid.shape[0], 0:grid.shape[1]]
-    all_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
+    # If grid is too sparse, return original
+    if len(y_indices) < 4:
+        return grid.copy()
 
-    # Interpolate
-    interpolated_values = griddata(valid_points, valid_values, all_points) # method='linear' default
+    # Subsample points for large grids to improve performance
+    if len(y_indices) > 500:
+        sample_idx = np.random.choice(len(y_indices), 500, replace=False)
+        y_indices = y_indices[sample_idx]
+        x_indices = x_indices[sample_idx]
 
-    # Use nearest neighbor for remaining NaN values
-    nan_mask = np.isnan(interpolated_values)
-    if np.any(nan_mask):
-        nearest_values = griddata(valid_points, valid_values, all_points[nan_mask], method='nearest')
-        interpolated_values[nan_mask] = nearest_values
+    # Create point coordinates and values for interpolation
+    points = np.column_stack((x_indices, y_indices))
+    values = grid[y_indices, x_indices]
 
-    # Reshape back to grid
-    filled_grid = interpolated_values.reshape(grid.shape)
+    # Create a meshgrid for all points in the grid
+    height, width = grid.shape
 
-    return filled_grid
+    # For very large grids, use a coarser resolution first
+    if height * width > 10000:
+        # Create a downsampled grid
+        step = max(1, min(height, width) // 50)
+        y_grid, x_grid = np.mgrid[0:height:step, 0:width:step]
+
+        # Interpolate on coarse grid
+        result_grid = np.full_like(grid, np.nan)
+        grid_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
+
+        # Use faster linear interpolation
+        coarse_values = griddata(points, values, grid_points, method='linear')
+
+        # Map interpolated values back to grid
+        for i, (x, y) in enumerate(grid_points):
+            if not np.isnan(coarse_values[i]):
+                result_grid[y, x] = coarse_values[i]
+
+        # Use nearest interpolation to fill remaining NaNs
+        if np.any(np.isnan(result_grid)):
+            # Get valid points from first interpolation
+            y_valid, x_valid = np.where(~np.isnan(result_grid))
+            if len(y_valid) > 0:
+                valid_points = np.column_stack((x_valid, y_valid))
+                valid_values = result_grid[y_valid, x_valid]
+
+                # Get NaN points
+                y_nan, x_nan = np.where(np.isnan(result_grid))
+                if len(y_nan) > 0:
+                    nan_points = np.column_stack((x_nan, y_nan))
+                    nan_values = griddata(valid_points, valid_values, nan_points, method='nearest')
+
+                    # Fill NaN points
+                    for i, (x, y) in enumerate(nan_points):
+                        result_grid[y, x] = nan_values[i]
+    else:
+        # For smaller grids, interpolate directly with higher quality
+        y_grid, x_grid = np.mgrid[0:height, 0:width]
+        grid_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
+
+        # Use linear interpolation
+        result_values = griddata(points, values, grid_points, method='linear')
+        result_grid = result_values.reshape(height, width)
+
+        # Fill remaining NaNs with nearest neighbor
+        if np.any(np.isnan(result_grid)):
+            nan_mask = np.isnan(result_grid)
+            result_grid[nan_mask] = griddata(points, values, grid_points[nan_mask.ravel()], method='nearest')
+
+    return result_grid
 
 def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(49, 49)) -> tuple:
     circles = json_data["Inclusions"]
@@ -1391,19 +1578,19 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
     if tuple is None:
         return None
 
-    (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1,downstroke2, fi, pi, time_i, P_ss, offset,
-     force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
-     force_oscillation, force_relaxation, stiffness_ratio,
-     jerk_max, zero_crossings_force, zero_crossings_position,
-     force_rms, position_rms, damping_coefficient,
-     spectral_centroid_force, spectral_entropy_force,
-     spectral_centroid_position, spectral_entropy_position,
-     impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient,
-     contact_area, adhesion_energy, wavelet_relative_energies, stft_mean_freq, imf_energy,
-     kv_E, kv_eta, mw_E, mw_eta, sls_E1, sls_E2, sls_eta, force_ptp, position_ptp, load_duration, unload_duration, load_unload_ratio,
-     loading_slope, unloading_slope, slope_symmetry, curvature_peak,
-     slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
-     hurst_exp, lyapunov_exp, tkeo_mean, correlation_fp
+    (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1, downstroke2, fi, pi, time_i, P_ss,
+    force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
+    force_oscillation, force_relaxation, stiffness_ratio,
+    jerk_max, zero_crossings_force, zero_crossings_position,
+    force_rms, position_rms, damping_coefficient,
+    spectral_centroid_force, spectral_entropy_force,
+    spectral_centroid_position, spectral_entropy_position,
+    impedance_ratio_lowfreq, coherence_LF, coherence_HF, elastic_coefficient, contact_area, adhesion_energy,
+    wavelet_relative_energies, stft_mean_freq, imf_energy, force_ptp, position_ptp, load_duration,
+    unload_duration,
+    load_unload_ratio, loading_slope, unloading_slope, slope_symmetry, curvature_peak,
+    slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
+    hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation
      ) = tuple
 
     label = get_label(posx, posy, centers, radii, materials)
@@ -1463,13 +1650,6 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "imf_energy_0": imf_energy[0],
         "imf_energy_1": imf_energy[1],
         "imf_energy_2": imf_energy[2],
-        "kv_E": kv_E,
-        "kv_eta": kv_eta,
-        "mw_E": mw_E,
-        "mw_eta": mw_eta,
-        "sls_E1": sls_E1,
-        "sls_E2": sls_E2,
-        "sls_eta": sls_eta,
         "force_ptp": force_ptp,
         "position_ptp": position_ptp,
         "load_duration": load_duration,
@@ -1486,9 +1666,10 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "hfd": hfd,
         "katz_fd": katz_fd,
         "hurst_exp": hurst_exp,
-        "lyapunov_exp": lyapunov_exp,
         "tkeo_mean": tkeo_mean,
         "correlation_fp": correlation_fp,
+        "peak_ratio": peak_ratio,
+        "position_relaxation": position_relaxation,
 
         # Keep raw signals for later processing
         "t": [df_input['CPXEts'].tolist()],
