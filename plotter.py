@@ -136,7 +136,7 @@ def plot_smoothing_effect(test_original, test_smooth, train_original, train_smoo
 
 def plot_features_singledf(df1, feature_list):
     for feature in feature_list:
-        fig, axes = plt.subplots(1, 1, figsize=(8, 8))  # 3 columns, 1 row
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))  # 1 plot
 
         # Scatter plot limits
         vmin, vmax = np.percentile(df1[feature].dropna(), [0.2, 99.8])
@@ -145,17 +145,16 @@ def plot_features_singledf(df1, feature_list):
         df1_label_0 = df1[df1["label"] == 0]
         df1_other_labels = df1[df1["label"] != 0]
 
-        axes[0].scatter(df1_label_0["posx"], df1_label_0["posy"], c=np.clip(df1_label_0[feature], vmin, vmax),
-                        cmap="viridis", vmin=vmin, vmax=vmax, marker='o', label="Label 0")
-        axes[0].scatter(df1_other_labels["posx"], df1_other_labels["posy"],
-                        c=np.clip(df1_other_labels[feature], vmin, vmax),
-                        cmap="viridis", vmin=vmin, vmax=vmax, marker='x', label="Other Labels")
-        axes[0].set_xlabel("Posx")
-        axes[0].set_ylabel("Posy")
-        axes[0].set_title(f"2D Plot of {feature} (Data1)")
-        axes[0].legend()
+        ax.scatter(df1_label_0["posx"], df1_label_0["posy"], c=np.clip(df1_label_0[feature], vmin, vmax),
+                  cmap="viridis", vmin=vmin, vmax=vmax, marker='o', label="Label 0")
+        ax.scatter(df1_other_labels["posx"], df1_other_labels["posy"],
+                  c=np.clip(df1_other_labels[feature], vmin, vmax),
+                  cmap="viridis", vmin=vmin, vmax=vmax, marker='x', label="Other Labels")
+        ax.set_xlabel("Posx")
+        ax.set_ylabel("Posy")
+        ax.set_title(f"2D Plot of {feature}")
+        ax.legend()
 
         # Adjust layout
         plt.tight_layout()
         plt.show()
-
