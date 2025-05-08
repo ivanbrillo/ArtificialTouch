@@ -367,10 +367,6 @@ def extract_features(data):
     complexity_value = np.sqrt(np.var(np.diff(np.diff(fi))) / np.var(np.diff(fi))) / mobility if mobility and np.var(
         np.diff(fi)) > 0 else None
 
-    # Skip computationally expensive fractal calculations
-    hfd = None
-    katz_fd = None
-
     # Simplified Hurst exponent
     hurst_exp = None
     try:
@@ -397,6 +393,25 @@ def extract_features(data):
     # Calculate peak ratio
     peak_ratio = force_max / np.max(pi) if np.max(pi) > 0 else None
 
+    # Ensure signal has sufficient variance for meaningful analysis
+    if np.std(fi) > 1e-6:
+        # Compute permutation entropy with error handling
+        try:
+            # Permutation entropy with embedding dimension 3, delay 1
+            perm_entropy = antropy.perm_entropy(fi, order=3, delay=1, normalize=True)
+        except Exception:
+            perm_entropy = np.nan
+        try:
+            # Sample_entropy
+            sample_entropy = antropy.sample_entropy(fi)
+        except Exception:
+            sample_entropy = np.nan
+    else:
+        perm_entropy = np.nan
+        sample_entropy = np.nan
+
+
+
     # Return all features in the original tuple format
     return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke1, downstroke2, fi, pi, time_i, P_ss,
             force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
@@ -409,8 +424,8 @@ def extract_features(data):
             wavelet_relative_energies, stft_mean_freq, imf_energy, force_ptp, position_ptp, load_duration,
             unload_duration,
             load_unload_ratio, loading_slope, unloading_slope, slope_symmetry, curvature_peak,
-            slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
-            hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation)
+            slope_log_log, activity, mobility, complexity_value,
+            hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation, perm_entropy, sample_entropy)
 
 def extract_curve_features(position, force):
     features = {}
@@ -534,16 +549,6 @@ def extract_curve_features(position, force):
             features[f'segment{seg}_force_std'] = np.nan
             features[f'segment{seg}_skew'] = np.nan
 
-    energy_input = np.trapezoid(force[:np.argmax(force) + 1], position[:np.argmax(force) + 1])
-    if not np.isnan(hysteresis_area) and not np.isnan(energy_input):
-        energy_dissipation_ratio = hysteresis_area / energy_input
-        strain_energy_density = energy_input / (np.max(position) - np.min(position)) if np.ptp(position) > 0 else None
-    else:
-        energy_dissipation_ratio = None
-        strain_energy_density = None
-    features['strain_energy_density'] = strain_energy_density
-    features['energy_dissipation_ratio'] = energy_dissipation_ratio
-
     return features
 
 def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', threshold=0.1):
@@ -559,8 +564,7 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
         'poly4_coef0', 'poly4_coef1', 'poly4_coef2', 'poly4_coef3', 'poly4_coef4',
         'poly5_coef0', 'poly5_coef1', 'poly5_coef2', 'poly5_coef3', 'poly5_coef4',
         'segment2_slope', 'segment3_slope', 'segment2_force_std', 'segment3_force_std',
-        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient','strain_energy_density','energy_dissipation_ratio'
-    ]
+        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient']
 
     # Initialize the hysteresis feature columns if they don't exist
     for feat in hysteresis_features:
@@ -676,7 +680,6 @@ def compute_spatial_and_surface_features(df):
     # Morphological Descriptors from Multi-threshold Contact Maps
     # Extract timeseries data for each point
     force_timeseries = {}
-    position_timeseries = {}
 
     for idx, row in df.iterrows():
         x, y = int(row['posx']), int(row['posy'])
@@ -685,7 +688,6 @@ def compute_spatial_and_surface_features(df):
             position_values = np.array(row['Pi'])
             if len(force_values) > 0 and len(position_values) > 0:
                 force_timeseries[(x, y)] = force_values
-                position_timeseries[(x, y)] = position_values
 
     # Define thresholds as quantiles
     all_forces = np.concatenate([f for f in force_timeseries.values() if len(f) > 0])
@@ -694,13 +696,19 @@ def compute_spatial_and_surface_features(df):
     # Compute morphological descriptors for each point and threshold
     morphological_features = {point: {} for point in existing_points}
 
-    # Maximum number of timesteps to analyze
-    timesteps = min(len(next(iter(force_timeseries.values()))), 1500) if force_timeseries else 0
+    # Maximum timesteps for sampling
+    max_timestep= min(len(next(iter(force_timeseries.values()))), 4500) if force_timeseries else 0
+
+    # Sample 10 time points evenly spaced throughout the range
+    if max_timestep >= 10:
+        sampled_timesteps = np.linspace(0, max_timestep - 1, 10, dtype=int)
+    else:
+        sampled_timesteps = range(max_timestep)  # Use all if less than 10 available
 
     # For each threshold
     for i, threshold in enumerate(thresholds):
-        # For each time point, create a binary map with padding
-        for t in range(timesteps):
+        # Process only sampled time points
+        for t in sampled_timesteps:
             # Create binary map with padding to avoid edge effects
             padded_binary_map = np.zeros((height + 2, width + 2), dtype=bool)
 
@@ -741,7 +749,7 @@ def compute_spatial_and_surface_features(df):
                             euler = measure.euler_number(component)
 
                             # Record features with border flag
-                            key = f"morph_t{i}_time{t}"
+                            key = f"morph_t{i}_time{i}"
                             morphological_features[(x, y)][key] = {
                                 'area': area,
                                 'perimeter': perimeter,
@@ -751,7 +759,7 @@ def compute_spatial_and_surface_features(df):
                             }
                         else:
                             # Record that this point was not active
-                            key = f"morph_t{i}_time{t}"
+                            key = f"morph_t{i}_time{i}"
                             morphological_features[(x, y)][key] = {
                                 'area': 0,
                                 'perimeter': 0,
@@ -785,15 +793,13 @@ def compute_spatial_and_surface_features(df):
             eulers = []
             actives = []
             border_touches = []
-
-            for t in range(timesteps):
-                key = f"morph_t{i}_time{t}"
-                if key in morphological_features[point]:
-                    areas.append(morphological_features[point][key]['area'])
-                    perimeters.append(morphological_features[point][key]['perimeter'])
-                    eulers.append(morphological_features[point][key]['euler'])
-                    actives.append(morphological_features[point][key]['active'])
-                    border_touches.append(morphological_features[point][key]['touches_border'])
+            key = f"morph_t{i}_time{i}"
+            if key in morphological_features[point]:
+                areas.append(morphological_features[point][key]['area'])
+                perimeters.append(morphological_features[point][key]['perimeter'])
+                eulers.append(morphological_features[point][key]['euler'])
+                actives.append(morphological_features[point][key]['active'])
+                border_touches.append(morphological_features[point][key]['touches_border'])
 
             # Compute statistics
             if areas:
@@ -814,87 +820,7 @@ def compute_spatial_and_surface_features(df):
                 morphological_features[point][f'active_ratio_t{i}'] = np.nan
                 morphological_features[point][f'border_touch_ratio_t{i}'] = np.nan
 
-    # Permutation Entropy and Fractal Measures
-    # For each point, compute these measures from the force signal
-    entropy_features = {}
-    fractal_features = {}
 
-    min_ts_length = 8  # Minimum time series length for reliable calculations
-
-    for point in existing_points:
-        if point in force_timeseries and len(force_timeseries[point]) >= min_ts_length:
-            force_signal = force_timeseries[point]
-
-            # Ensure signal has sufficient variance for meaningful analysis
-            if np.std(force_signal) > 1e-6:
-                # Compute permutation entropy with error handling
-                try:
-                    # Permutation entropy with embedding dimension 3, delay 1
-                    perm_entropy = antropy.perm_entropy(force_signal, order=3, delay=1, normalize=True)
-                    # Sample entropy
-                    sample_entropy = antropy.sample_entropy(force_signal)
-                    # Approximate entropy
-                    approx_entropy = antropy.app_entropy(force_signal)
-                except Exception:
-                    perm_entropy = np.nan
-                    sample_entropy = np.nan
-                    approx_entropy = np.nan
-
-                entropy_features[point] = {
-                    'perm_entropy': perm_entropy,
-                    'sample_entropy': sample_entropy,
-                    'approx_entropy': approx_entropy
-                }
-
-                # Compute fractal measures with error handling
-                try:
-                    # Hurst exponent (with bounds check)
-                    hurst_exp = nolds.hurst_rs(force_signal)
-                    hurst_exp = max(0.0, min(1.0, hurst_exp))  # Valid range is [0,1]
-
-                    # Detrended fluctuation analysis
-                    dfa_alpha = nolds.dfa(force_signal, overlap=True)
-
-                    # Correlation dimension if signal is long enough
-                    if len(force_signal) >= 50:
-                        corr_dim = nolds.corr_dim(force_signal, emb_dim=3)
-                    else:
-                        corr_dim = np.nan
-
-                except Exception:
-                    hurst_exp = np.nan
-                    dfa_alpha = np.nan
-                    corr_dim = np.nan
-
-                fractal_features[point] = {
-                    'hurst_exponent': hurst_exp,
-                    'dfa_alpha': dfa_alpha,
-                    'correlation_dim': corr_dim
-                }
-            else:
-                # Signal has no variance
-                entropy_features[point] = {
-                    'perm_entropy': 0,
-                    'sample_entropy': 0,
-                    'approx_entropy': 0
-                }
-                fractal_features[point] = {
-                    'hurst_exponent': 0.5,  # Random walk value
-                    'dfa_alpha': 0.5,  # Random walk value
-                    'correlation_dim': np.nan
-                }
-        else:
-            # Default values if insufficient data
-            entropy_features[point] = {
-                'perm_entropy': np.nan,
-                'sample_entropy': np.nan,
-                'approx_entropy': np.nan
-            }
-            fractal_features[point] = {
-                'hurst_exponent': np.nan,
-                'dfa_alpha': np.nan,
-                'correlation_dim': np.nan
-            }
     # Only process for EXISTING points
     for idx, row in df.iterrows():
         orig_x, orig_y = int(row['posx']), int(row['posy'])
@@ -959,49 +885,6 @@ def compute_spatial_and_surface_features(df):
                     # Assign Laplacian value
                     df.at[idx, f'laplacian_{feature}'] = laplacians[feature][y,x]
 
-                # Extract HOG features in local region
-                hog_region_size = 7
-                y_min_hog = max(0, y - hog_region_size // 2)
-                y_max_hog = min(height - 1, y + hog_region_size // 2) + 1
-                x_min_hog = max(0, x - hog_region_size // 2)
-                x_max_hog = min(width - 1, x + hog_region_size // 2) + 1
-
-                hog_region = grids['Stiffness'][y_min_hog:y_max_hog, x_min_hog:x_max_hog]
-                # Fill NaN values for HOG calculation
-                if np.any(np.isnan(hog_region)):
-                    hog_region = np.nan_to_num(hog_region, nan=np.nanmean(hog_region))
-
-                if hog_region.shape[0] >= 3 and hog_region.shape[1] >= 3:  # Minimum size check for HOG
-                    # Normalize region for HOG
-                    hog_region = (hog_region - np.min(hog_region)) / (np.ptp(hog_region) + 1e-10)
-
-                    try:
-                        hog_features, hog_image = hog(
-                            hog_region,
-                            orientations=8,
-                            pixels_per_cell=(2, 2),
-                            cells_per_block=(1, 1),
-                            visualize=True,
-                            feature_vector=True
-                        )
-
-                        # Store top 3 orientation bins from HOG
-                        if len(hog_features) > 0:
-                            top_hog_bins = np.argsort(hog_features)[-3:]
-                            for i, bin_idx in enumerate(top_hog_bins):
-                                df.at[idx, f'hog_bin{i + 1}'] = bin_idx
-                                df.at[idx, f'hog_val{i + 1}'] = hog_features[bin_idx]
-
-                            # Store overall HOG strength
-                            df.at[idx, 'hog_mean'] = np.mean(hog_features)
-                            df.at[idx, 'hog_std'] = np.std(hog_features)
-                    except Exception:
-                        # Fallback if HOG fails
-                        for i in range(3):
-                            df.at[idx, f'hog_bin{i + 1}'] = np.nan
-                            df.at[idx, f'hog_val{i + 1}'] = np.nan
-                        df.at[idx, 'hog_mean'] = np.nan
-                        df.at[idx, 'hog_std'] = np.nan
 
                 # Deviation from global mean
                 df.at[idx, 'stiffness_deviation_from_global'] = grids['Stiffness'][y, x] - global_mean_stiffness
@@ -1049,7 +932,6 @@ def compute_spatial_and_surface_features(df):
                     df.at[idx, f'lbp_entropy_P{P}_R{R}'] = -np.sum(hist[hist > 0] * np.log2(hist[hist > 0]))
 
                 # Compute structure tensors for directional information
-                # Reuse gx, gy from gradient calculations or sobel_gx, sobel_gy
                 s_xx = sobel_gx[feature][y,x] * sobel_gx[feature][y,x]
                 s_xy = sobel_gx[feature][y,x] * sobel_gy[feature][y,x]
                 s_yy = sobel_gy[feature][y,x] * sobel_gy[feature][y,x]
@@ -1408,100 +1290,39 @@ def compute_spatial_and_surface_features(df):
                 df.at[idx, 'dist_to_grid_edge'] = morphological_features[point]['dist_to_edge']
                 df.at[idx, 'is_grid_corner'] = morphological_features[point]['is_corner']
 
-                # Add entropy features
-                if point in entropy_features:
-                    df.at[idx, 'perm_entropy'] = entropy_features[point]['perm_entropy']
-                    df.at[idx, 'sample_entropy'] = entropy_features[point]['sample_entropy']
-                    df.at[idx, 'approx_entropy'] = entropy_features[point]['approx_entropy']
-
-                # Add fractal features
-                if point in fractal_features:
-                    df.at[idx, 'hurst_exponent'] = fractal_features[point]['hurst_exponent']
-                    df.at[idx, 'dfa_alpha'] = fractal_features[point]['dfa_alpha']
-                    df.at[idx, 'correlation_dim'] = fractal_features[point]['correlation_dim']
-
-
     return df
 
 
 def interpolate_missing_values(grid):
     """
-    Optimized version of interpolate_missing_values.
+    Interpolate missing values in a grid using nearest neighbor interpolation.
     """
-    # Quick check if interpolation is needed
-    if not np.any(np.isnan(grid)) or np.all(np.isnan(grid)):
+    # Check if the grid has any non-NaN values
+    if np.all(np.isnan(grid)):
         return grid.copy()
 
     # Get coordinates of non-NaN values
     y_indices, x_indices = np.where(~np.isnan(grid))
+    valid_points = np.column_stack((x_indices, y_indices))
+    valid_values = grid[y_indices, x_indices]
 
-    # If grid is too sparse, return original
-    if len(y_indices) < 4:
-        return grid.copy()
+    # Create grid coordinates for interpolation
+    y_grid, x_grid = np.mgrid[0:grid.shape[0], 0:grid.shape[1]]
+    all_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
 
-    # Subsample points for large grids to improve performance
-    if len(y_indices) > 500:
-        sample_idx = np.random.choice(len(y_indices), 500, replace=False)
-        y_indices = y_indices[sample_idx]
-        x_indices = x_indices[sample_idx]
+    # Interpolate
+    interpolated_values = griddata(valid_points, valid_values, all_points) # method='linear' default
 
-    # Create point coordinates and values for interpolation
-    points = np.column_stack((x_indices, y_indices))
-    values = grid[y_indices, x_indices]
+    # Use nearest neighbor for remaining NaN values
+    nan_mask = np.isnan(interpolated_values)
+    if np.any(nan_mask):
+        nearest_values = griddata(valid_points, valid_values, all_points[nan_mask], method='nearest')
+        interpolated_values[nan_mask] = nearest_values
 
-    # Create a meshgrid for all points in the grid
-    height, width = grid.shape
+    # Reshape back to grid
+    filled_grid = interpolated_values.reshape(grid.shape)
 
-    # For very large grids, use a coarser resolution first
-    if height * width > 10000:
-        # Create a downsampled grid
-        step = max(1, min(height, width) // 50)
-        y_grid, x_grid = np.mgrid[0:height:step, 0:width:step]
-
-        # Interpolate on coarse grid
-        result_grid = np.full_like(grid, np.nan)
-        grid_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
-
-        # Use faster linear interpolation
-        coarse_values = griddata(points, values, grid_points, method='linear')
-
-        # Map interpolated values back to grid
-        for i, (x, y) in enumerate(grid_points):
-            if not np.isnan(coarse_values[i]):
-                result_grid[y, x] = coarse_values[i]
-
-        # Use nearest interpolation to fill remaining NaNs
-        if np.any(np.isnan(result_grid)):
-            # Get valid points from first interpolation
-            y_valid, x_valid = np.where(~np.isnan(result_grid))
-            if len(y_valid) > 0:
-                valid_points = np.column_stack((x_valid, y_valid))
-                valid_values = result_grid[y_valid, x_valid]
-
-                # Get NaN points
-                y_nan, x_nan = np.where(np.isnan(result_grid))
-                if len(y_nan) > 0:
-                    nan_points = np.column_stack((x_nan, y_nan))
-                    nan_values = griddata(valid_points, valid_values, nan_points, method='nearest')
-
-                    # Fill NaN points
-                    for i, (x, y) in enumerate(nan_points):
-                        result_grid[y, x] = nan_values[i]
-    else:
-        # For smaller grids, interpolate directly with higher quality
-        y_grid, x_grid = np.mgrid[0:height, 0:width]
-        grid_points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
-
-        # Use linear interpolation
-        result_values = griddata(points, values, grid_points, method='linear')
-        result_grid = result_values.reshape(height, width)
-
-        # Fill remaining NaNs with nearest neighbor
-        if np.any(np.isnan(result_grid)):
-            nan_mask = np.isnan(result_grid)
-            result_grid[nan_mask] = griddata(points, values, grid_points[nan_mask.ravel()], method='nearest')
-
-    return result_grid
+    return filled_grid
 
 def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(49, 49)) -> tuple:
     circles = json_data["Inclusions"]
@@ -1589,8 +1410,8 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
     wavelet_relative_energies, stft_mean_freq, imf_energy, force_ptp, position_ptp, load_duration,
     unload_duration,
     load_unload_ratio, loading_slope, unloading_slope, slope_symmetry, curvature_peak,
-    slope_log_log, activity, mobility, complexity_value, hfd, katz_fd,
-    hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation
+    slope_log_log, activity, mobility, complexity_value,
+    hurst_exp, tkeo_mean, correlation_fp, peak_ratio, position_relaxation, perm_entropy, sample_entropy
      ) = tuple
 
     label = get_label(posx, posy, centers, radii, materials)
@@ -1663,13 +1484,13 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "activity": activity,
         "mobility": mobility,
         "complexity_value": complexity_value,
-        "hfd": hfd,
-        "katz_fd": katz_fd,
         "hurst_exp": hurst_exp,
         "tkeo_mean": tkeo_mean,
         "correlation_fp": correlation_fp,
         "peak_ratio": peak_ratio,
         "position_relaxation": position_relaxation,
+        "perm_entropy": perm_entropy,
+        "sample_entropy": sample_entropy,
 
         # Keep raw signals for later processing
         "t": [df_input['CPXEts'].tolist()],
