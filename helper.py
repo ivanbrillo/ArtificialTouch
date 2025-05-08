@@ -31,8 +31,8 @@ feature_list_all = [
     "wavelet_energy_3", "wavelet_energy_4", "stft_mean_freq",
     "imf_energy_0", "imf_energy_1", "imf_energy_2", "force_ptp", "position_ptp",
     "load_duration", "unload_duration", "load_unload_ratio", "loading_slope", "unloading_slope", "slope_symmetry",
-    "curvature_peak", "slope_log_log", "activity", "mobility", "complexity_value", "hfd", "katz_fd", "hurst_exp",
-    "tkeo_mean", "correlation_fp", "peak_ratio", "position_relaxation"
+    "curvature_peak", "slope_log_log", "activity", "mobility", "complexity_value", "hurst_exp",
+    "tkeo_mean", "correlation_fp", "peak_ratio", "position_relaxation","perm_entropy","sample_entropy",
     # Curve features
     "peak_position", "hysteresis_area", "loading_energy", "loading_nonlinearity",
     "loading_unloading_area_ratio", "force_ratio_75_25", "loading_skewness", "loading_kurtosis",
@@ -56,11 +56,6 @@ feature_list_all = [
 
     # Laplacian features
     'laplacian_Stiffness', 'laplacian_Upstroke', 'laplacian_Downstroke1', 'laplacian_Downstroke2', 'laplacian_Tau', 'laplacian_time_to_max',
-
-    # HOG features
-    'hog_bin1', 'hog_bin2', 'hog_bin3',
-    'hog_val1', 'hog_val2', 'hog_val3',
-    'hog_mean', 'hog_std',
 
     # Global deviation features
     'stiffness_deviation_from_global', 'position_deviation_from_global',
@@ -131,12 +126,6 @@ feature_list_all = [
 
     # Position context features
     'dist_to_grid_edge', 'is_grid_corner',
-
-    # Entropy features
-    'perm_entropy', 'sample_entropy', 'approx_entropy',
-
-    # Fractal features
-    'hurst_exponent', 'dfa_alpha', 'correlation_dim'
 ]
 
 
