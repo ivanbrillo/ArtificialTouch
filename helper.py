@@ -23,7 +23,7 @@ feature_list2 = feature_list_time2 + feature_list_hysteresis2
 feature_list_all = [
     "Stiffness", "Tau", "Force Steady State", "Power", "Entropy", "Upstroke", "Downstroke1", "Downstroke2",
     "Dominant Frequency", "P_ss", "offset", "force_max", "time_to_max", "force_overshoot", "force_relaxation",
-    "stiffness_ratio", "force_oscillation", "peak_width", "max_pos_rate", "max_position", "hysteresis_area",
+    "stiffness_ratio", "force_oscillation", "peak_width", "max_pos_rate", "max_position",
     "energy_input", "jerk_max", "zero_crossings_force", "zero_crossings_position", "force_rms", "position_rms",
     "damping_coefficient", "spectral_centroid_force", "spectral_entropy_force", "spectral_centroid_position",
     "spectral_entropy_position", "impedance_ratio_lowfreq", "coherence_LF", "coherence_HF", "elastic_coeff",
@@ -32,7 +32,7 @@ feature_list_all = [
     "imf_energy_0", "imf_energy_1", "imf_energy_2", "force_ptp", "position_ptp",
     "load_duration", "unload_duration", "load_unload_ratio", "loading_slope", "unloading_slope", "slope_symmetry",
     "curvature_peak", "slope_log_log", "activity", "mobility", "complexity_value", "hurst_exp",
-    "tkeo_mean", "correlation_fp", "peak_ratio", "position_relaxation","perm_entropy","sample_entropy",
+    "tkeo_mean", "correlation_fp", "peak_ratio", "position_relaxation","perm_entropy","sample_entropy",'oscillation_to_max_force','stiffness_to_relaxation',
     # Curve features
     "peak_position", "hysteresis_area", "loading_energy", "loading_nonlinearity",
     "loading_unloading_area_ratio", "force_ratio_75_25", "loading_skewness", "loading_kurtosis",
