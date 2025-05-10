@@ -1443,7 +1443,6 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "max_pos_rate": max_pos_rate,
         # New features
         "max_position": np.max(pi) if len(pi) > 0 else None,
-        "hysteresis_area": np.trapezoid(fi, pi) if len(fi) > 0 and len(pi) > 0 else None,
         "energy_input": np.trapezoid(fi[:np.argmax(fi) + 1], pi[:np.argmax(fi) + 1]) if len(fi) > 0 and len(
             pi) > 0 else None,
         "jerk_max": jerk_max,
