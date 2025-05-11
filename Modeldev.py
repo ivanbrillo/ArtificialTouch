@@ -150,9 +150,9 @@ def objective_rf(trial, X, y, groups, cv, ad = None):
 
         # Scenario 1: Allena su gruppo1-train, valuta su gruppo2-val
         X_train = X_group1.iloc[train_idx1]
-        y_train = y_group1.iloc[train_idx1]
+        y_train = y_group1[train_idx1]
         X_val = X_group2.iloc[val_idx2]
-        y_val = y_group2.iloc[val_idx2]
+        y_val = y_group2[val_idx2]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -164,9 +164,9 @@ def objective_rf(trial, X, y, groups, cv, ad = None):
 
         # Scenario 2: Allena su gruppo2-train, valuta su gruppo1-val
         X_train = X_group2.iloc[train_idx2]
-        y_train = y_group2.iloc[train_idx2]
+        y_train = y_group2[train_idx2]
         X_val = X_group1.iloc[val_idx1]
-        y_val = y_group1.iloc[val_idx1]
+        y_val = y_group1[val_idx1]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -203,9 +203,9 @@ def objective_svc(trial, X, y, groups, cv, ad = None):
             cv.split(X_group2, y_group2, groups[group_2_mask])):
 
         X_train = X_group1.iloc[train_idx1]
-        y_train = y_group1.iloc[train_idx1]
+        y_train = y_group1[train_idx1]
         X_val = X_group2.iloc[val_idx2]
-        y_val = y_group2.iloc[val_idx2]
+        y_val = y_group2[val_idx2]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -216,9 +216,9 @@ def objective_svc(trial, X, y, groups, cv, ad = None):
         scores.append(f1_score(y_val, y_pred, average='macro'))
 
         X_train = X_group2.iloc[train_idx2]
-        y_train = y_group2.iloc[train_idx2]
+        y_train = y_group2[train_idx2]
         X_val = X_group1.iloc[val_idx1]
-        y_val = y_group1.iloc[val_idx1]
+        y_val = y_group1[val_idx1]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -259,9 +259,9 @@ def objective_xgb(trial, X, y, groups, cv, ad = None):
             cv.split(X_group2, y_group2, groups[group_2_mask])):
 
         X_train = X_group1.iloc[train_idx1]
-        y_train = y_group1.iloc[train_idx1]
+        y_train = y_group1[train_idx1]
         X_val = X_group2.iloc[val_idx2]
-        y_val = y_group2.iloc[val_idx2]
+        y_val = y_group2[val_idx2]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -272,9 +272,9 @@ def objective_xgb(trial, X, y, groups, cv, ad = None):
         scores.append(f1_score(y_val, y_pred, average='macro'))
 
         X_train = X_group2.iloc[train_idx2]
-        y_train = y_group2.iloc[train_idx2]
+        y_train = y_group2[train_idx2]
         X_val = X_group1.iloc[val_idx1]
-        y_val = y_group1.iloc[val_idx1]
+        y_val = y_group1[val_idx1]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -288,14 +288,30 @@ def objective_xgb(trial, X, y, groups, cv, ad = None):
 
 
 def objective_logistic(trial, X, y, groups, cv, ad = None):
+    # Choose penalty type first
+    penalty = trial.suggest_categorical('penalty', ['l1', 'l2', None, 'elasticnet'])
+
+    # Define solver options based on penalty, but keep them as fixed lists in the code
+    if penalty in ['l1', 'l2']:
+        # Both liblinear and saga support these
+        solver = trial.suggest_categorical('solver', ['liblinear', 'saga'])
+    elif penalty is None:
+        # Only saga supports None penalty
+        solver = 'saga'
+    elif penalty == 'elasticnet':
+        # Only saga supports elasticnet
+        solver = 'saga'
+
+    # Define the parameter dictionary
     param = {
         'C': trial.suggest_float('C', 1e-3, 100, log=True),
-        'solver': trial.suggest_categorical('solver', ['liblinear', 'saga']),
-        'penalty': trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', 'none']),
+        'penalty': penalty,
+        'solver': solver,
         'max_iter': 1000,
         'random_state': 42
     }
-    if param['penalty'] == 'elasticnet':
+    # Add l1_ratio only if penalty is elasticnet
+    if penalty == 'elasticnet':
         param['l1_ratio'] = trial.suggest_float('l1_ratio', 0, 1)
 
     unique_groups = np.unique(groups)
@@ -312,9 +328,9 @@ def objective_logistic(trial, X, y, groups, cv, ad = None):
             cv.split(X_group2, y_group2, groups[group_2_mask])):
 
         X_train = X_group1.iloc[train_idx1]
-        y_train = y_group1.iloc[train_idx1]
+        y_train = y_group1[train_idx1]
         X_val = X_group2.iloc[val_idx2]
-        y_val = y_group2.iloc[val_idx2]
+        y_val = y_group2[val_idx2]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -325,9 +341,9 @@ def objective_logistic(trial, X, y, groups, cv, ad = None):
         scores.append(f1_score(y_val, y_pred, average='macro'))
 
         X_train = X_group2.iloc[train_idx2]
-        y_train = y_group2.iloc[train_idx2]
+        y_train = y_group2[train_idx2]
         X_val = X_group1.iloc[val_idx1]
-        y_val = y_group1.iloc[val_idx1]
+        y_val = y_group1[val_idx1]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -365,9 +381,9 @@ def objective_gb(trial, X, y, groups, cv, ad = None):
             cv.split(X_group2, y_group2, groups[group_2_mask])):
 
         X_train = X_group1.iloc[train_idx1]
-        y_train = y_group1.iloc[train_idx1]
+        y_train = y_group1[train_idx1]
         X_val = X_group2.iloc[val_idx2]
-        y_val = y_group2.iloc[val_idx2]
+        y_val = y_group2[val_idx2]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
@@ -378,9 +394,9 @@ def objective_gb(trial, X, y, groups, cv, ad = None):
         scores.append(f1_score(y_val, y_pred, average='macro'))
 
         X_train = X_group2.iloc[train_idx2]
-        y_train = y_group2.iloc[train_idx2]
+        y_train = y_group2[train_idx2]
         X_val = X_group1.iloc[val_idx1]
-        y_val = y_group1.iloc[val_idx1]
+        y_val = y_group1[val_idx1]
 
         if ad is not None:
             X_train, y_train = ad.fit_resample(X_train, y_train)
