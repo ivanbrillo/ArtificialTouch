@@ -1375,15 +1375,13 @@ def get_label(posx, posy, centers, radii, materials) -> int:
 def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | None:
     df_input['forceZ'] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
     offset = np.mean(df_input['forceZ'][df_input['isArrived_Festo'] == 1])
-    scaling = np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1])
-    #Z-score on force
+    # Force normalization
     df_input['forceZ'] = (df_input['forceZ'] - offset)  / np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
 
     df_input['posz'] = df_input['posz'] + df_input['posz2'] / 200 + df_input['posz_d'] / 1000
-    #offset_p = np.mean(df_input['posz'][df_input['isArrived_Festo'] == 1])
-    #scaling_p = np.std(df_input['posz'][df_input['isArrived_Festo'] == 1])
-    #Z-score on position
-    #df_input['posz'] = (df_input['posz'] - offset_p) / scaling_p
+    offset_p = np.mean(df_input['posz'][df_input['isArrived_Festo'] == 1])
+    # Position normalization
+    df_input['posz'] = (df_input['posz'] - offset_p) /  np.mean(df_input['posz'][df_input['isTouching_SMAC'] == 1][ -30:])
 
     df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 

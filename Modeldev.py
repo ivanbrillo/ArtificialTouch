@@ -12,76 +12,241 @@ from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 import xgboost as xgb
 
-# Define the TwoStageClassifier class
-class TwoStageClassifier:
-    def __init__(self, binary_classifier, multiclass_classifier, binary_features=None, multiclass_features=None, binary_unbalanced=False):
+from sklearn.base import BaseEstimator, ClassifierMixin
+import numpy as np
+from imblearn.over_sampling import ADASYN
+from sklearn.base import clone
+
+
+class TwoStageClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, binary_classifier=None, multiclass_classifier=None,
+                 binary_features=None, multiclass_features=None,
+                 binary_unbalanced=False, train_smoothed=None,
+                 apply_smoothing=False, grid_range=1):
+        """
+        Two-stage classifier that first determines if a sample is class 0 or non-zero,
+        then classifies non-zero samples into specific classes.
+
+        Parameters:
+        -----------
+        binary_classifier : classifier object
+            The classifier used for binary (zero vs non-zero) classification
+        multiclass_classifier : classifier object
+            The classifier used for multiclass classification among non-zero classes
+        binary_features : list or None
+            Features to use for binary classification. If None, all features are used.
+        multiclass_features : list or None
+            Features to use for multiclass classification. If None, all features are used.
+        binary_unbalanced : bool, default=False
+            Whether to apply ADASYN resampling to handle unbalanced binary classes
+        train_smoothed : array-like or None
+            Pre-smoothed training data for multiclass classification
+        apply_smoothing : bool, default=False
+            Whether to apply grid max smoothing during prediction
+        grid_range : int, default=1
+            Range for grid max smoothing (grid_range=1 creates a 3x3 grid)
+        """
         self.binary_classifier = binary_classifier
         self.multiclass_classifier = multiclass_classifier
         self.binary_features = binary_features
         self.multiclass_features = multiclass_features
         self.binary_unbalanced = binary_unbalanced
-        if hasattr(multiclass_classifier, 'get_xgb_params') or type(multiclass_classifier).__name__.startswith('XGB'):
+        self.train_smoothed = train_smoothed
+        self.apply_smoothing = apply_smoothing
+        self.grid_range = grid_range
+
+        # Check if multiclass classifier is XGBoost
+        if hasattr(multiclass_classifier, 'get_xgb_params') or (
+                multiclass_classifier is not None and
+                type(multiclass_classifier).__name__.startswith('XGB')):
             self.is_xgb_multiclass = True
         else:
             self.is_xgb_multiclass = False
 
     def fit(self, X, y):
+        """
+        Fit the two-stage classifier to training data.
+
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Training data
+        y : array-like of shape (n_samples,)
+            Target values
+
+        Returns:
+        --------
+        self : object
+            Returns self
+        """
+        # Store the classes seen during fit
+        self.classes_ = np.unique(y)
+
         # Binary task: classify as zero (y == 0) or non-zero (y > 0)
         X_binary = X[self.binary_features] if self.binary_features else X
         y_binary = (y > 0).astype(int)
 
+        # Clone the binary classifier to make a proper estimator
+        self.binary_model_ = clone(self.binary_classifier)
+
         if self.binary_unbalanced:
-            # Handle unbalanced binary classification
+            # Handle unbalanced binary classification with ADASYN
             adasyn = ADASYN(sampling_strategy='auto', random_state=42, n_neighbors=10)
             X_binary_ad, y_binary_ad = adasyn.fit_resample(X_binary, y_binary)
-            self.binary_classifier.fit(X_binary_ad, y_binary_ad)
+            self.binary_model_.fit(X_binary_ad, y_binary_ad)
         else:
-            self.binary_classifier.fit(X_binary, y_binary)
+            self.binary_model_.fit(X_binary, y_binary)
 
         # Multiclass task: classify among non-zero classes only
         mask_nonzero = y > 0
         if np.any(mask_nonzero):
-            X_nonzero = X[mask_nonzero]
+            # Clone the multiclass classifier
+            self.multiclass_model_ = clone(self.multiclass_classifier)
+
+            # Use pre-smoothed training data if provided
+            if self.train_smoothed is not None:
+                X_nonzero = self.train_smoothed
+            else:
+                # Otherwise, get non-zero sample
+                X_nonzero = X[mask_nonzero]
+
+            # Extract features for multiclass classifier
+            X_nonzero_features = X_nonzero[self.multiclass_features] if self.multiclass_features else X_nonzero
             y_nonzero = y[mask_nonzero]
-            X_nonzero = X_nonzero[self.multiclass_features] if self.multiclass_features else X_nonzero
-            self.multiclass_classifier.fit(X_nonzero, y_nonzero)
 
             # Only adjust labels for XGBoost
             if self.is_xgb_multiclass:
                 # Store original class labels for prediction later
                 self.original_classes = np.sort(np.unique(y_nonzero))
-                # Shift labels to be zero-indexed
+                # Shift labels to be zero-indexed for XGBoost
                 y_nonzero = y_nonzero - 1
 
-            self.multiclass_classifier.fit(X_nonzero, y_nonzero)
+            self.multiclass_model_.fit(X_nonzero_features, y_nonzero)
 
         return self
 
     def predict(self, X):
+        """
+        Predict class labels for samples in X.
+
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Samples to predict
+
+        Returns:
+        --------
+        y : array-like of shape (n_samples,)
+            Predicted class labels
+        """
         # First, predict binary outcome
         X_binary = X[self.binary_features] if self.binary_features else X
-        binary_pred = self.binary_classifier.predict(X_binary)
+        binary_pred = self.binary_model_.predict(X_binary)
 
         # Initialize predictions with zeros
-        final_pred = np.zeros(len(X))
+        final_pred = np.zeros(len(X), dtype=int)
 
         # For samples predicted as non-zero, apply multiclass classifier
         nonzero_mask = binary_pred > 0
         if np.any(nonzero_mask):
+            # Get the samples predicted as non-zero
             X_nonzero = X[nonzero_mask]
-            X_nonzero = X_nonzero[self.multiclass_features] if self.multiclass_features else X_nonzero
-            multiclass_pred = self.multiclass_classifier.predict(X_nonzero)
+
+            # Apply smoothing if enabled
+            if self.apply_smoothing:
+                X_nonzero = self.grid_max_smooth(
+                    X_nonzero,
+                    features_to_smooth=self.multiclass_features,
+                    grid_range=self.grid_range
+                )
+
+            X_nonzero_features = X_nonzero[self.multiclass_features] if self.multiclass_features else X_nonzero
+
+            multiclass_pred = self.multiclass_model_.predict(X_nonzero_features)
+
             # If using XGBoost, shift predictions back to original scale
             if self.is_xgb_multiclass:
                 multiclass_pred = multiclass_pred + 1
+
             final_pred[nonzero_mask] = multiclass_pred
 
         return final_pred
 
+    def grid_max_smooth(self, df, features_to_smooth=None, grid_range=1):
+        """
+        Efficiently smooth each feature using a grid around each point.
+
+        Parameters:
+        -----------
+        df : DataFrame
+            Data to smooth, must contain 'posx' and 'posy' columns
+        features_to_smooth : list or None
+            Features to smooth. If None, uses self.multiclass_features
+        grid_range : int, default=1
+            Range of the grid (grid_range=1 creates a 3x3 grid)
+
+        Returns:
+        --------
+        df_smoothed : DataFrame
+            Smoothed data
+        """
+        if features_to_smooth is None:
+            features_to_smooth = self.multiclass_features if self.multiclass_features else df.columns
+
+        df_smoothed = df.copy()
+
+        # Create a spatial index - a dictionary mapping (x,y) to row index position O(1) - instead of repeated search
+        spatial_index = {}
+        for i, (idx, row) in enumerate(df.iterrows()):
+            spatial_index[(row['posx'], row['posy'])] = i
+
+        # Process each feature
+        for feature in features_to_smooth:
+            if feature not in df.columns or feature in ['posx', 'posy', 'label']:
+                continue
+
+            feature_values = df[feature].values  # Cache the feature values array
+            smoothed_values = np.empty_like(feature_values)
+
+            # For each position in the original dataframe
+            for i, (idx, row) in enumerate(df.iterrows()):
+                x, y = row['posx'], row['posy']
+                grid_values = []
+
+                # Check each cell in the grid
+                for dx in range(-grid_range, grid_range + 1):
+                    for dy in range(-grid_range, grid_range + 1):
+                        # Use the spatial index for direct lookup
+                        grid_pos = (x + dx, y + dy)
+                        if grid_pos in spatial_index:
+                            pos = spatial_index[grid_pos]
+                            grid_values.append(feature_values[pos])
+
+                # Take the maximum of the values found in the grid
+                smoothed_values[i] = max(grid_values) if grid_values else feature_values[i]
+
+            # Assign all values at once
+            df_smoothed[feature] = smoothed_values
+
+        return df_smoothed
+
     def predict_proba(self, X):
+        """
+        Predict class probabilities for samples in X.
+
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Samples to predict
+
+        Returns:
+        --------
+        proba : array-like of shape (n_samples, n_classes)
+            Probability estimates for each class
+        """
         # Get binary probabilities using the binary features
         X_binary = X[self.binary_features] if self.binary_features else X
-        binary_proba = self.binary_classifier.predict_proba(X_binary)
+        binary_proba = self.binary_model_.predict_proba(X_binary)
 
         # Get probability of being in class 0 vs non-zero
         prob_zero = binary_proba[:, 0]  # prob of being in class 0
@@ -93,17 +258,30 @@ class TwoStageClassifier:
             # For XGBoost, we need to account for the shifted labels
             num_classes = len(self.original_classes) + 1
         else:
-            num_classes = len(np.unique(self.multiclass_classifier.classes_)) + 1
+            try:
+                num_classes = len(np.unique(self.multiclass_model_.classes_)) + 1
+            except AttributeError:
+                num_classes = len(self.classes_)
 
         final_proba = np.zeros((X.shape[0], num_classes))
 
         # Set the probability for class 0
         final_proba[:, 0] = prob_zero
 
-        # Get multiclass probabilities for samples using the multiclass features
-        # Note: We apply this to all samples but will scale by the probability of being non-zero
-        X_multi = X[self.multiclass_features] if self.multiclass_features else X
-        multiclass_proba = self.multiclass_classifier.predict_proba(X_multi)
+        # Apply smoothing if enabled
+        X_multi = X.copy()
+        if self.apply_smoothing:
+            X_multi = self.grid_max_smooth(
+                X_multi,
+                features_to_smooth=self.multiclass_features,
+                grid_range=self.grid_range
+            )
+
+        # Extract features for multiclass classifier
+        X_multi_features = X_multi[self.multiclass_features] if self.multiclass_features else X_multi
+
+        # Get multiclass probabilities
+        multiclass_proba = self.multiclass_model_.predict_proba(X_multi_features)
 
         # Scale the multiclass probabilities by the probability of being non-zero
         # For each non-zero class (1, 2, 3, etc.)

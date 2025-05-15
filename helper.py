@@ -128,6 +128,12 @@ feature_list_all = [
     'dist_to_grid_edge', 'is_grid_corner',
 ]
 
+feature_optimal = [
+'Stiffness', 'Tau', 'Entropy', 'Upstroke', 'Downstroke', 'P_ss', 'time_to_max', 'force_overshoot', 'force_relaxation', 'max_position', 'force_rms', 'position_rms', 'damping_coefficient',
+'elastic_coeff', 'contact_area', 'force_ptp', 'position_ptp', 'load_duration', 'activity', 'mobility', 'tkeo_mean', 'correlation_fp', 'peak_ratio', 'sample_entropy', 'loading_skewness',
+'loading_kurtosis', 'cubic_coefficient', 'quartic_coefficient', 'strain_energy_density', 'local_mean_Upstroke', 'local_mean_Tau', 'stiffness_deviation_from_global_median',
+'position_deviation_from_global_median', 'stiffness_z_score', 'position_z_score'
+]
 
 def plot_class_distribution(labels, ax, title):
     sns.countplot(x=labels, ax=ax, palette='Set2', hue=labels)
