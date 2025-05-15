@@ -94,7 +94,7 @@ def plot_confusion_matrix(y_true, y_pred, title, ax, class_labels=[0, 1, 2, 3, 4
 
 
 # Plot the smoothing effect for comparison
-def plot_smoothing_effect(test_original, test_smooth, train_original, train_smoothed, feature):
+def plot_smoothing_effect(validation_original, validation_smooth, train_original, train_smoothed, feature):
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
     # Plot original values
@@ -114,15 +114,15 @@ def plot_smoothing_effect(test_original, test_smooth, train_original, train_smoo
     axes[0][1].set_ylabel("posy")
 
     # Test set
-    sc3 = axes[1][0].scatter(test_original['posx'], test_original['posy'],
-                             c=test_original[feature], cmap='viridis',
+    sc3 = axes[1][0].scatter(validation_original['posx'], validation_original['posy'],
+                             c=validation_original[feature], cmap='viridis',
                              s=50, alpha=0.8)
     axes[1][0].set_title(f"Test Original {feature}")
     axes[1][0].set_xlabel("posx")
     axes[1][0].set_ylabel("posy")
 
-    sc4 = axes[1][1].scatter(test_smooth['posx'], test_smooth['posy'],
-                             c=test_smooth[feature], cmap='viridis',
+    sc4 = axes[1][1].scatter(validation_smooth['posx'], validation_smooth['posy'],
+                             c=validation_smooth[feature], cmap='viridis',
                              s=50, alpha=0.8)
     axes[1][1].set_title(f"Test Max Smoothed {feature}")
     axes[1][1].set_xlabel("posx")
