@@ -1,15 +1,16 @@
-from sys import dont_write_bytecode
-
-import pandas as pd
 import glob
-import numpy as np
 import json
+
+import antropy
+import numpy as np
+import pandas as pd
 from pandas import DataFrame
+from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
-from scipy.signal import welch
-from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
+
+from smoothingHelper import get_grid_bounds
 
 materials_label = {
     "Dragon Skin shore 20A": 1,
@@ -24,6 +25,12 @@ def extract_features(data):
     # Gaussian Smoothing
     data['Fz_s'] = gaussian_filter1d(data['forceZ'], sigma=2)
     data['posz_s'] = gaussian_filter1d(data['posz'], sigma=2)
+    # Force normalization
+    offset = np.mean(data['Fz_s'][data['isArrived_Festo'] == 1])
+    data['Fz_s'] = (data['Fz_s'] - offset) / np.mean(data['Fz_s'][data['isTouching_SMAC'] == 1][-30:])
+    # Position normalization
+    offset_p = np.mean(data['posz_s'][data['isArrived_Festo'] == 1])
+    data['posz_s'] = (data['posz_s'] - offset_p) / np.mean(data['posz_s'][data['isTouching_SMAC'] == 1][-30:])
 
     pz = (data['posz_s'][data['isArrived_Festo'] == 1] / 1000).to_numpy()  # From mm to m
     fz = (data['Fz_s'][data['isArrived_Festo'] == 1]).to_numpy()
@@ -49,184 +56,146 @@ def extract_features(data):
     pi = g(time_i)
     pt = g2(time_t)
 
-    # Force Decay Rate (τ)
-    decay_time = time_t - time_t[0]
-    decay_force = np.log(ft)  # Log transform to get a linear function like ln(F) = -t/tau + c
-    tau, _, _, _, _ = linregress(decay_time, decay_force)
-    tau = -1 / tau  # Convert to time constant
-
-    # Steady-State Force (F_ss) - Mean force at end of signal
-    F_ss = np.mean(ft[-30:])
-    P_ss = np.mean(ft[-30:])
-
-    # Ensure fi has values meeting the conditions before accessing indices
-    if np.any(fi >= 0.1):
-        start_idx = np.where(fi >= 0.1)[0][0]
-        stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
-
-        if np.any(fi > 0.5):
-            idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
-            idx2 = np.where(fi >= 0.1)[0][0]  # First index where force > 0.1
-            upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-            idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
-            idx2 = np.where(fi >= 0.1)[0][-1]  # First index where force > 0.1
-            downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-        else:
-            upstroke = None
-            downstroke = None
-    else:
-        stiffness = None  # Or set to a default value or handle as needed
-        upstroke = None
-        downstroke = None
-
-    # Hardness
-    # start_idx = np.where(fi >= 0.1)[0][0]
-    # stiffness = (np.max(fi) - 0.1) / (pi[np.argmax(fi)] - pi[start_idx])
-    # idx1 = np.where(fi > 0.5)[0][0]  # First index where force > 0.5
-    # idx2 = np.where(fi > 0.1)[0][0]  # First index where force > 0.1
-    # upstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-    #
-    # idx1 = np.where(fi > 0.5)[0][-1]  # First index where force > 0.5
-    # idx2 = np.where(fi > 0.1)[0][-1]  # First index where force > 0.1
-    # downstroke = (fi[idx1] - fi[idx2]) / (time_i[idx1] - time_i[idx2])
-
-    offset = np.mean(ft[:5]) - np.mean(ft[:-10])
-
-    # PSD
-    freqs, psd = welch(ft, fs=1 / np.median(np.diff(time_i)))
-    power = np.mean(np.square(ft)) / (time_i[-1] - time_i[0])
-
-    psd_peak = freqs[np.argmax(psd)]
-
-    # Entropy of the Force Signal
-    try:
-        prob_dist = np.histogram(ft, bins=30, density=True)[
-            0]  # Probability distribution
-        prob_dist = prob_dist[prob_dist > 0]  # Remove zero probabilities
-        entropy = -np.sum(prob_dist * np.log2(
-            prob_dist))  # Shannon entropy => measure of randomness (estimation of fluctuations in the signal)
-    except Exception:
-        entropy = None
-
-    # NEW FEATURES
-
-    # 1. Initial Force Peak Characteristics
+    # Calculate key indices
     force_max = np.max(fi)
     force_max_idx = np.argmax(fi)
+    steady_state_start_idx = min(force_max_idx + int(len(fi) * 0.05), len(fi) - 101)
+    steady_state_force = np.mean(
+        fi[steady_state_start_idx:steady_state_start_idx + 100]) if steady_state_start_idx < len(fi) - 100 else np.mean(
+        fi[-100:])
+
+    # Calculate force thresholds
+    low_threshold = 0.1 * force_max
+    mid_threshold = 0.5 * force_max
+    high_threshold = 0.75 * force_max
+
+    # Force Decay Rate (τ)
+    decay_time = time_t - time_t[0]
+    decay_force = np.log(np.maximum(ft, 1e-10))  # Avoid log(0)
+    tau_result = linregress(decay_time, decay_force)
+    tau = -1 / tau_result.slope if tau_result.slope != 0 else None
+
+    # Steady-State Force
+    F_ss = steady_state_force
+    P_ss = np.mean(pt[-30:]) if len(pt) >= 30 else None
+
+    # Calculate stiffness using pre-computed thresholds
+    stiffness = None
+    upstroke = None
+    downstroke = None
+
+    # Find indices efficiently
+    low_idx_up = np.where(fi >= low_threshold)[0]
+    mid_idx_up = np.where(fi >= mid_threshold)[0]
+
+    post_peak_indices = np.where((fi <= high_threshold) & (np.arange(len(fi)) > force_max_idx))[0]
+    down_end_indices = np.where((fi <= low_threshold) & (np.arange(len(fi)) > force_max_idx))[0]
+
+    if len(low_idx_up) > 0:
+        up_start_idx = low_idx_up[0]
+
+        # Calculate stiffness
+        if pi[force_max_idx] != pi[up_start_idx]:
+            stiffness = (force_max - fi[up_start_idx]) / (pi[force_max_idx] - pi[up_start_idx])
+
+        # Calculate upstroke
+        if len(mid_idx_up) > 0:
+            mid_up_idx = mid_idx_up[0]
+            if pi[mid_up_idx] != pi[up_start_idx]:
+                upstroke = (fi[mid_up_idx] - fi[up_start_idx]) / (pi[mid_up_idx] - pi[up_start_idx])
+
+        # Calculate downstrokes
+        if len(post_peak_indices) > 0:
+            down1_idx = post_peak_indices[0]
+            if len(down_end_indices) > 0:
+                down_end_idx = down_end_indices[0]
+                if pi[down1_idx] != pi[down_end_idx]:
+                    downstroke = (fi[down1_idx] - fi[down_end_idx]) / (pi[down1_idx] - pi[down_end_idx])
+
+    # Entropy
+    hist, _ = np.histogram(ft, bins=22, density=True)
+    hist_positive = hist[hist > 0]
+    entropy = -np.sum(hist_positive * np.log2(hist_positive)) if len(hist_positive) > 0 else None
+
+    # Additional features
     time_to_max = time_i[force_max_idx] - time_i[0]
+    force_overshoot = (force_max - F_ss) / F_ss if F_ss > 0 else 0
 
-    # 2. Force Overshoot - This seems prominent in your graphs
-    steady_state_start_idx = force_max_idx + int(len(fi) * 0.1)  # Skip a bit after peak
-    steady_state_force = np.mean(fi[steady_state_start_idx:steady_state_start_idx + 100])
-    force_overshoot = (force_max - steady_state_force) / steady_state_force
-
-    # 3. Initial Peak Width - Different materials show different peak widths
-    half_height = (force_max - fi[0]) / 2 + fi[0]
-    above_half_height = np.where(fi > half_height)[0]
-
-    if len(above_half_height) > 0:
-        peak_width = time_i[above_half_height[-1]] - time_i[above_half_height[0]]
-    else:
-        peak_width = None
-
-    # 5. Position Response Rate
-    # Calculate the rate of position change during initial loading
-    pos_rate = np.diff(pi[:force_max_idx + 1]) / np.diff(time_i[:force_max_idx + 1])
-    max_pos_rate = np.max(pos_rate) if len(pos_rate) > 0 else 0
-
-    # 6. Force Oscillation
-    # Calculate standard deviation in force during steady state as a measure of oscillations
-    steady_state_region = fi[steady_state_start_idx:steady_state_start_idx + 150]
-    force_oscillation = np.std(steady_state_region)
-
-    # 7. Force Relaxation Ratio - Captures material relaxation properties
+    # Force relaxation
     if len(ft) > 100:
-        early_touch_force = np.mean(ft[10:30])  # Skip the first few points
-        late_touch_force = np.mean(ft[-30:])
-        force_relaxation = (early_touch_force - late_touch_force) / early_touch_force
+        force_relaxation = (force_max - np.mean(ft[-50:])) / force_max if force_max > 0 else 0
     else:
         force_relaxation = 0
 
-    # 8. Initial Stiffness vs Later Stiffness (Stiffness Change)
-    # This can capture non-linear elastic behavior
-    if len(pi) > 100 and len(fi) > 100:
+    # Force/position RMS
+    force_rms = np.sqrt(np.mean(np.square(fi)))
 
-        if np.any(fi >= 0.3 * force_max):
-            early_stiffness_idx = np.where(fi >= 0.3 * force_max)[0][0]
-            early_stiffness = fi[early_stiffness_idx] / (pi[early_stiffness_idx] - pi[0])
-        else:
-            early_stiffness = None
+    # Damping coefficient (optimized to avoid singular matrix errors)
+    try:
+        # Calculate velocity
+        velocity = np.gradient(pi, time_i)
+        A = np.vstack([pi, velocity]).T
+        coeffs, _, _, _ = np.linalg.lstsq(A, fi, rcond=1e-10)
+        _, damping_coefficient = coeffs
+    except:
+        damping_coefficient = None
 
-        if np.any(fi >= 0.7 * force_max):
-            late_stiffness_idx = np.where(fi >= 0.7 * force_max)[0][0]
-            late_stiffness = (fi[late_stiffness_idx] - fi[early_stiffness_idx]) / (
-                    pi[late_stiffness_idx] - pi[early_stiffness_idx])
-        else:
-            late_stiffness = None
+    # Contact area estimation
+    contact_area = None
+    if stiffness and stiffness > 0:
+        R = 0.005  # Estimated radius in meters
+        nu = 0.5  # Typical Poisson's ratio
+        contact_area = - np.pi * ((3 * (1 - nu * 2) * force_max * R / (4 * stiffness)) * (
+                2 / 3))  # Minus is to ensure right format for smoothing during classification
 
-        stiffness_ratio = late_stiffness / early_stiffness if (
-                early_stiffness is not None and early_stiffness != 0 and late_stiffness is not None) else None
+    # Force peak-to-peak
+    force_ptp = np.ptp(fi)
+
+    # Load duration calculation
+    load_duration = time_i[force_max_idx] - time_i[0]
+
+    # Hjorth parameters
+    activity = np.var(fi)
+    mobility = np.sqrt(np.var(np.diff(fi)) / activity) if activity > 0 else None
+
+    # Teager-Kaiser Energy Operator (simplified)
+    tkeo_mean = None
+    try:
+        tkeo = fi[1:-1] ** 2 - fi[:-2] * fi[2:]
+        tkeo_mean = np.mean(tkeo)
+    except:
+        pass
+
+    # Correlation between force and position
+    correlation_fp = np.corrcoef(fi, pi)[0, 1] if len(fi) > 1 and len(pi) > 1 else None
+
+    # Calculate peak ratio
+    peak_ratio = force_max / np.max(pi) if np.max(pi) > 0 else None
+
+    # Ensure signal has sufficient variance for meaningful analysis
+    if np.std(fi) > 1e-6:
+        try:
+            # Sample_entropy
+            sample_entropy = antropy.sample_entropy(fi)
+        except Exception:
+            sample_entropy = np.nan
     else:
-        stiffness_ratio = None
+        sample_entropy = np.nan
 
-    # Return all features including the new ones
-    return (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke, fi, pi, time_i, P_ss, offset,
-            force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
-            force_oscillation, force_relaxation, stiffness_ratio)
+    # Return all features in tuple format
+    return (stiffness, tau, entropy, upstroke, downstroke, fi, pi, time_i, P_ss,
+            time_to_max, force_overshoot, force_relaxation,
+            force_rms, damping_coefficient, contact_area,
+            force_ptp, load_duration,
+            activity, mobility,
+            tkeo_mean, correlation_fp, peak_ratio, sample_entropy)
 
 
 def extract_curve_features(position, force):
     features = {}
-
-    # --- 1. Peak detection ---
     peak_idx = np.argmax(force)
-    features['peak_position'] = position[peak_idx]
 
-    # --- 2. Hysteresis area ---
-    # Ensure the curve is closed (append first point if necessary)
-    if not np.array_equal(position[0], position[-1]) or not np.array_equal(force[0], force[-1]):
-        position_closed = np.append(position, position[0])
-        force_closed = np.append(force, force[0])
-    else:
-        position_closed = position
-        force_closed = force
-    features['hysteresis_area'] = 0.5 * abs(np.sum(
-        position_closed[:-1] * force_closed[1:] - position_closed[1:] * force_closed[:-1]
-    ))
-
-    # --- 3. Loading energy (area under loading curve) ---
-    features['loading_energy'] = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
-
-    # --- 4. Loading nonlinearity ---
-    if peak_idx > 10:
-        try:
-            quad_fit = np.polyfit(position[:peak_idx + 1], force[:peak_idx + 1], 2)
-            features['loading_nonlinearity'] = abs(quad_fit[0])
-        except Exception:
-            features['loading_nonlinearity'] = np.nan
-    else:
-        features['loading_nonlinearity'] = np.nan
-
-    # --- 5. Loading-to-unloading area ratio ---
-    if peak_idx > 10 and peak_idx < len(position) - 10:
-        loading_area = np.trapz(force[:peak_idx + 1], position[:peak_idx + 1])
-        unloading_area = np.trapz(force[peak_idx:], position[peak_idx:])
-        features['loading_unloading_area_ratio'] = loading_area / abs(unloading_area) if unloading_area != 0 else np.nan
-    else:
-        features['loading_unloading_area_ratio'] = np.nan
-
-    # --- 6. Force ratio (75% displacement / 25% displacement) ---
-    if peak_idx > 5:
-        peak_pos = position[peak_idx]
-        idx_25 = np.argmin(np.abs(position[:peak_idx + 1] - 0.25 * peak_pos))
-        idx_75 = np.argmin(np.abs(position[:peak_idx + 1] - 0.75 * peak_pos))
-        f25 = force[idx_25]
-        f75 = force[idx_75]
-        features['force_ratio_75_25'] = f75 / f25 if f25 != 0 else np.nan
-    else:
-        features['force_ratio_75_25'] = np.nan
-
-    # --- 7. Loading skewness and kurtosis ---
+    # Loading skewness and kurtosis
     if peak_idx > 5:
         features['loading_skewness'] = skew(force[:peak_idx + 1])
         features['loading_kurtosis'] = kurtosis(force[:peak_idx + 1])
@@ -234,21 +203,10 @@ def extract_curve_features(position, force):
         features['loading_skewness'] = np.nan
         features['loading_kurtosis'] = np.nan
 
-    # --- 8. Polynomial curve fits ---
+    # Polynomial curve fits
     if peak_idx > 15:
         x_load = position[:peak_idx + 1]
         y_load = force[:peak_idx + 1]
-        x_norm = (x_load - np.min(x_load)) / (np.ptp(x_load) if np.ptp(x_load) != 0 else 1)
-        y_norm = y_load / np.max(y_load) if np.max(y_load) != 0 else y_load
-
-        for degree in [3, 4, 5]:
-            try:
-                poly_fit = np.polyfit(x_norm, y_norm, degree)
-                for i, coef in enumerate(poly_fit):
-                    features[f'poly{degree}_coef{i}'] = coef
-            except Exception:
-                for i in range(degree + 1):
-                    features[f'poly{degree}_coef{i}'] = np.nan
 
         try:
             cubic_fit = np.polyfit(x_load, y_load, 3)
@@ -261,38 +219,8 @@ def extract_curve_features(position, force):
         except Exception:
             features['quartic_coefficient'] = np.nan
     else:
-        for degree in [3, 4, 5]:
-            for i in range(degree + 1):
-                features[f'poly{degree}_coef{i}'] = np.nan
         features['cubic_coefficient'] = np.nan
         features['quartic_coefficient'] = np.nan
-
-    # --- 9. Segmentation features (only segments 2 and 3) ---
-    if peak_idx > 15:
-        num_segments = 4
-        segment_size = (peak_idx + 1) // num_segments
-        for seg in [2, 3]:
-            start = seg * segment_size
-            end = (seg + 1) * segment_size if seg < num_segments - 1 else peak_idx + 1
-            if end - start > 5:
-                seg_pos = position[start:end]
-                seg_force = force[start:end]
-                slope = (seg_force[-1] - seg_force[0]) / (seg_pos[-1] - seg_pos[0]) if (seg_pos[-1] - seg_pos[
-                    0]) != 0 else np.nan
-                std = np.std(seg_force)
-                seg_skew = skew(seg_force) if len(seg_force) > 3 else np.nan
-            else:
-                slope = np.nan
-                std = np.nan
-                seg_skew = np.nan
-            features[f'segment{seg}_slope'] = slope
-            features[f'segment{seg}_force_std'] = std
-            features[f'segment{seg}_skew'] = seg_skew
-    else:
-        for seg in [2, 3]:
-            features[f'segment{seg}_slope'] = np.nan
-            features[f'segment{seg}_force_std'] = np.nan
-            features[f'segment{seg}_skew'] = np.nan
 
     return features
 
@@ -302,16 +230,8 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
     Given a DataFrame (with force and position data stored as arrays/lists in each row),
     compute the hysteresis features using extract_curve_features() and add them as new columns.
     """
-    # List of hysteresis features (update if additional features are added in extract_curve_features)
-    hysteresis_features = [
-        'peak_position', 'hysteresis_area', 'loading_energy', 'loading_nonlinearity',
-        'loading_unloading_area_ratio', 'force_ratio_75_25', 'loading_skewness',
-        'loading_kurtosis', 'poly3_coef0', 'poly3_coef1', 'poly3_coef2', 'poly3_coef3',
-        'poly4_coef0', 'poly4_coef1', 'poly4_coef2', 'poly4_coef3', 'poly4_coef4',
-        'poly5_coef0', 'poly5_coef1', 'poly5_coef2', 'poly5_coef3', 'poly5_coef4',
-        'segment2_slope', 'segment3_slope', 'segment2_force_std', 'segment3_force_std',
-        'segment2_skew', 'segment3_skew', 'cubic_coefficient', 'quartic_coefficient'
-    ]
+    # List of hysteresis features
+    hysteresis_features = ['loading_skewness', 'loading_kurtosis', 'cubic_coefficient', 'quartic_coefficient']
 
     # Initialize the hysteresis feature columns if they don't exist
     for feat in hysteresis_features:
@@ -334,7 +254,85 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
     return df
 
 
-import numpy as np
+def compute_spatial_and_surface_features(df):
+    """
+    Compute spatial, surface and LBP features across the 2D grid.
+    Only existing data points are used when computing local and global statistics.
+    """
+    x_min, y_min, (height, width) = get_grid_bounds(df)
+
+    features_list = ['Stiffness', 'Upstroke', 'Tau']
+    existing_points = set(zip(df['posx'].astype(int), df['posy'].astype(int)))
+
+    # Build raw grids (with NaNs for missing cells)
+    grids = {}
+    for feature in features_list:
+        grid = np.full((height, width), np.nan)
+        for idx, row in df.iterrows():
+            x = int(row['posx']) - x_min
+            y = int(row['posy']) - y_min
+            if 0 <= x < width and 0 <= y < height:
+                grid[y, x] = row[feature]
+        grids[feature] = grid
+
+    # Build position grid
+    position_grid = np.full((height, width), np.nan)
+    for _, row in df.iterrows():
+        x = int(row['posx']) - x_min
+        y = int(row['posy']) - y_min
+        if 0 <= x < width and 0 <= y < height:
+            position_grid[y, x] = row['P_ss']
+
+    # Global statistics computed only on measured cells
+    global_mean_stiffness = np.nanmean(grids['Stiffness'])
+    global_mean_position = np.nanmean(position_grid)
+    global_std_stiffness = np.nanstd(grids['Stiffness'])
+    global_std_position = np.nanstd(position_grid)
+    global_median_stiffness = np.nanmedian(grids['Stiffness'])
+    global_median_position = np.nanmedian(position_grid)
+
+    # Compute features only for existing points
+    for idx, row in df.iterrows():
+        orig_x, orig_y = int(row['posx']), int(row['posy'])
+        if (orig_x, orig_y) not in existing_points:
+            continue
+
+        x = orig_x - x_min
+        y = orig_y - y_min
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+
+        # Define 3x3 patch boundaries
+        x_min, x_max = max(0, x - 1), min(width - 1, x + 1) + 1
+        y_min, y_max = max(0, y - 1), min(height - 1, y + 1) + 1
+
+        # Spatial: local means
+        for feature in features_list:
+            patch = grids[feature][y_min:y_max, x_min:x_max].flatten()
+            patch = patch[~np.isnan(patch)]
+            if patch.size > 0:
+                df.at[idx, f'local_mean_{feature}'] = patch.mean()
+
+        # Deviations from global mean & median, and z-scores
+        val_stiff = grids['Stiffness'][y, x]
+        val_pos = position_grid[y, x]
+
+        df.at[idx, 'stiffness_deviation_from_global'] = val_stiff - global_mean_stiffness
+        df.at[idx, 'position_deviation_from_global'] = val_pos - global_mean_position
+
+        df.at[idx, 'stiffness_deviation_from_global_median'] = val_stiff - global_median_stiffness
+        df.at[idx, 'position_deviation_from_global_median'] = val_pos - global_median_position
+
+        df.at[idx, 'stiffness_z_score'] = (
+            (val_stiff - global_mean_stiffness) / global_std_stiffness
+            if global_std_stiffness > 0 else np.nan
+        )
+        df.at[idx, 'position_z_score'] = (
+            (val_pos - global_mean_position) / global_std_position
+            if global_std_position > 0 else np.nan
+        )
+
+    return df
 
 
 def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(49, 49)) -> tuple:
@@ -353,7 +351,7 @@ def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(4
     # Extract original centers
     c = np.array([(circle["Position"][0] + offset[0], circle["Position"][1] + offset[1]) for circle in circles])
 
-    # Shift, rotate, and shift back **without rounding**
+    # Shift, rotate, and shift back *without rounding*
     c_shifted = c - center
 
     if symmetric:
@@ -361,7 +359,6 @@ def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(4
 
     if symm_v:
         c_shifted = np.array([(-x, y) for x, y in c_shifted])
-
 
     c_rotated = np.dot(c_shifted, R)
     c_final = c_rotated + center + np.array([-1, -1])  # Keep as float
@@ -376,21 +373,21 @@ def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(4
 
 
 def get_label(posx, posy, centers, radii, materials) -> int:
-    for i in range(len(centers)):
-        center_x, center_y = centers[i]
-        radius = radii[i]
-        material = materials[i]
-        # Check if point is within the circle
-        if ((posx - center_x) ** 2 + (posy - center_y) ** 2) <= (radius) ** 2:
+    """
+    Determine the material label for a point (posx, posy) by checking
+    which inclusion circle it falls into. Returns 0 if none match.
+    """
+    for center, radius, material in zip(centers, radii, materials):
+        center_x, center_y = center
+        # Check if point is within the circle using proper squared-distance
+        if (posx - center_x) ** 2 + (posy - center_y) ** 2 <= radius ** 2:
             return materials_label[material]
-            # return (i // 5) + 1  # Assign label based on group of 5 circles
-    return 0  # Default label
+    return 0  # Default label if point lies outside all circles
 
 
 def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | None:
     df_input['forceZ'] = np.where(abs(df_input["Fz"]) < 27648, df_input["Fz"] / 27648, df_input["Fz"] / 32767)
-    offset = np.mean(df_input['forceZ'][df_input['isArrived_Festo'] == 1].head(20))
-    df_input['forceZ'] = (df_input['forceZ'] - offset)  / np.mean(df_input['forceZ'][df_input['isTouching_SMAC'] == 1][ -30:])  # / np.std(df_input['forceZ'][df_input['isArrived_Festo'] == 1].tolist())   #  # /
+    df_input['posz'] = df_input['posz'] + df_input['posz2'] / 200 + df_input['posz_d'] / 1000
     df_input['CPXEts'] = df_input['CPXEts'] - df_input['CPXEts'].min()
 
     posx = np.round(np.mean(df_input['posx'][df_input['isArrived_Festo'] == 1] + df_input['posx_d'][
@@ -401,19 +398,19 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
     if posx < 50 or posy < 50:
         return None
 
-    df_input['posz'] = df_input['posz'] + df_input['posz2'] / 200 + df_input['posz_d'] / 1000
-
     tuple = extract_features(df_input)
     if tuple is None:
         return None
 
-    (stiffness, tau, F_ss, power, entropy, psd_peak, upstroke, downstroke, fi, pi, time_i, P_ss, offset,
-     force_max, time_to_max, force_overshoot, peak_width, max_pos_rate,
-     force_oscillation, force_relaxation, stiffness_ratio) = tuple
+    (stiffness, tau, entropy, upstroke, downstroke, fi, pi, time_i, P_ss,
+     time_to_max, force_overshoot, force_relaxation,
+     force_rms, damping_coefficient, contact_area,
+     force_ptp, load_duration,
+     activity, mobility,
+     tkeo_mean, correlation_fp, peak_ratio, sample_entropy
+     ) = tuple
 
     label = get_label(posx, posy, centers, radii, materials)
-
-    # row = 'Test' if 110 <= posy <= 125 else 'Train'
 
     new_df = DataFrame({
         "posx": posx,
@@ -421,48 +418,49 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "posz": [df_input['posz'].tolist()],
         "Stiffness": stiffness,
         "Tau": tau,
-        "Force Steady State": F_ss,
-        "Power": power,
         "Entropy": entropy,
         "Upstroke": upstroke,
         "Downstroke": downstroke,
-        "Dominant Frequency": psd_peak,
         "P_ss": P_ss,
-        "offset": offset,
-        "force_max": force_max,
         "time_to_max": time_to_max,
         "force_overshoot": force_overshoot,
         "force_relaxation": force_relaxation,
-        "stiffness_ratio": stiffness_ratio,
-        "force_oscillation": force_oscillation,
-        "peak_width": peak_width,
-        "max_pos_rate": max_pos_rate,
+        "force_rms": force_rms,
+        "damping_coefficient": damping_coefficient,
+        "contact_area": contact_area,
+        "force_ptp": force_ptp,
+        "load_duration": load_duration,
+        "activity": activity,
+        "mobility": mobility,
+        "tkeo_mean": tkeo_mean,
+        "correlation_fp": correlation_fp,
+        "peak_ratio": peak_ratio,
+        "sample_entropy": sample_entropy,
 
-        # "Fz": [df_input['forceZ'].tolist()],
+        # Keep raw signals for later processing
         "t": [df_input['CPXEts'].tolist()],
         "Fz_s": [df_input['Fz_s'].tolist()],
         "posz_s": [df_input['posz_s'].tolist()],
-        # "Touching": [df_input['isTouching_SMAC'].tolist()],
         "Fi": [fi],
         "Pi": [pi],
         "Timei": [time_i],
         "label": label,
-        # "Row": row
     })
 
     new_df = compute_hysteresis_features_for_df(new_df, force_column='Fi', pos_column='Pi')
     return new_df
 
 
-def create_df(path: str = 'DamasconeA/Dataset/*.csv', symmetric=False, symm_v=False, angle=0, offset = (49, 49)) -> DataFrame | None:
+def create_df(path: str = 'DamasconeA/Dataset/*.csv', symmetric=False, symm_v=False, angle=0,
+              offset=(49, 49)) -> DataFrame | None:
     # Load JSON file
-
     strings = path.split('/')
-    with open(strings[0] + "/phantom_metadata.json", "r") as file:
+    with open(strings[0] + "/" + strings[1] + "/phantom_metadata.json", "r") as file:
         json_data = json.load(file)
 
     # Create lists of centers + radii (for each labeled area)
-    centers, radii, materials = find_inclusions(json_data, symmetric=symmetric, angle=angle, symm_v=symm_v, offset=offset)
+    centers, radii, materials = find_inclusions(json_data, symmetric=symmetric, angle=angle, symm_v=symm_v,
+                                                offset=offset)
 
     # Get list of all CSV files
     csv_files = glob.glob(path)
@@ -482,4 +480,6 @@ def create_df(path: str = 'DamasconeA/Dataset/*.csv', symmetric=False, symm_v=Fa
 
     cleaned_df_list = [df.dropna(how='all') for df in df_list]
     non_empty_df_list = [df for df in cleaned_df_list if len(df) > 0]
-    return pd.concat(non_empty_df_list, ignore_index=True)
+    combined_df = pd.concat(non_empty_df_list, ignore_index=True)
+    combined_df = compute_spatial_and_surface_features(combined_df)
+    return combined_df

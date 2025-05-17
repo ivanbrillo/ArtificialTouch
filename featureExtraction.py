@@ -111,6 +111,7 @@ def find_best_features_sets(
         mi_th,
         wasserstein_th,
         wasserstein_th_per_class,
+        classes_to_check
 ):
     """
     For each (w_th,w_th_c) in the grid, smooth the df, then compute silhouette_score on the smoothed feature matrix in order to select
@@ -127,7 +128,7 @@ def find_best_features_sets(
                 X_validation_scaled=X_validation,
                 y_validation=y_validation,
                 feature_list=features_to_smooth,
-                selected_classes=[2, 3, 4, 5],
+                selected_classes=classes_to_check,
                 mi_threshold=mi_th,
                 wasserstein_threshold=w_th,
                 class_wasserstein_threshold=w_th_c

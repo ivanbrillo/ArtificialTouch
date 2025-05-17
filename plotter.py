@@ -95,38 +95,38 @@ def plot_confusion_matrix(y_true, y_pred, title, ax, class_labels=[0, 1, 2, 3, 4
 
 # Plot the smoothing effect for comparison
 def plot_smoothing_effect(validation_original, validation_smooth, train_original, train_smoothed, feature):
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
 
     # Plot original values
-    sc1 = axes[0][0].scatter(train_original['posx'], train_original['posy'],
-                             c=train_original[feature], cmap='viridis',
-                             s=50, alpha=0.8)
-    axes[0][0].set_title(f"Train Original {feature}")
-    axes[0][0].set_xlabel("posx")
-    axes[0][0].set_ylabel("posy")
+    sc1 = axes[0].scatter(train_original['posx'], train_original['posy'],
+                          c=train_original[feature], cmap='viridis',
+                          s=50, alpha=0.8)
+    axes[0].set_title(f"Train Original {feature}")
+    axes[0].set_xlabel("posx")
+    axes[0].set_ylabel("posy")
 
     # Plot smoothed values
-    sc2 = axes[0][1].scatter(train_smoothed['posx'], train_smoothed['posy'],
-                             c=train_smoothed[feature], cmap='viridis',
-                             s=50, alpha=0.8)
-    axes[0][1].set_title(f"Train Max Smoothed {feature}")
-    axes[0][1].set_xlabel("posx")
-    axes[0][1].set_ylabel("posy")
+    sc2 = axes[1].scatter(train_smoothed['posx'], train_smoothed['posy'],
+                          c=train_smoothed[feature], cmap='viridis',
+                          s=50, alpha=0.8)
+    axes[1].set_title(f"Train Max Smoothed {feature}")
+    axes[1].set_xlabel("posx")
+    axes[1].set_ylabel("posy")
 
-    # Test set
-    sc3 = axes[1][0].scatter(validation_original['posx'], validation_original['posy'],
-                             c=validation_original[feature], cmap='viridis',
-                             s=50, alpha=0.8)
-    axes[1][0].set_title(f"Test Original {feature}")
-    axes[1][0].set_xlabel("posx")
-    axes[1][0].set_ylabel("posy")
+    # Validation set
+    sc3 = axes[2].scatter(validation_original['posx'], validation_original['posy'],
+                          c=validation_original[feature], cmap='viridis',
+                          s=50, alpha=0.8)
+    axes[2].set_title(f"Validation Original {feature}")
+    axes[2].set_xlabel("posx")
+    axes[2].set_ylabel("posy")
 
-    sc4 = axes[1][1].scatter(validation_smooth['posx'], validation_smooth['posy'],
-                             c=validation_smooth[feature], cmap='viridis',
-                             s=50, alpha=0.8)
-    axes[1][1].set_title(f"Test Max Smoothed {feature}")
-    axes[1][1].set_xlabel("posx")
-    axes[1][1].set_ylabel("posy")
+    sc4 = axes[3].scatter(validation_smooth['posx'], validation_smooth['posy'],
+                          c=validation_smooth[feature], cmap='viridis',
+                          s=50, alpha=0.8)
+    axes[3].set_title(f"Validation Max Smoothed {feature}")
+    axes[3].set_xlabel("posx")
+    axes[3].set_ylabel("posy")
 
     plt.tight_layout()
     plt.show()

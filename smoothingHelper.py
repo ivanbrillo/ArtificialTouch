@@ -105,3 +105,42 @@ def smooth_subset(subset_df, feature_list, smoothing_config):
     # Add back metadata columns
     smoothed_subset[['label', 'posx', 'posy']] = subset_df[['label', 'posx', 'posy']]
     return smoothed_subset
+
+
+def grid_max_smooth(df, features_to_smooth, grid_range=1):
+    """
+    Efficiently smooth each feature using a 3x3 grid around each point and take the maximum value.
+    """
+    df_smoothed = df.copy()
+
+    # Create a spatial index - a dictionary mapping (x,y) to row index position O(1) - instead of repeated search
+    spatial_index = {}
+    for i, (idx, row) in enumerate(df.iterrows()):
+        spatial_index[(row['posx'], row['posy'])] = i
+
+    # Process each feature
+    for feature in features_to_smooth:
+        feature_values = df[feature].values  # Cache the feature values array
+        smoothed_values = np.empty_like(feature_values)
+
+        # For each position in the original dataframe
+        for i, (idx, row) in enumerate(df.iterrows()):
+            x, y = row['posx'], row['posy']
+            grid_values = []
+
+            # Check each cell in the 3x3 grid
+            for dx in range(-grid_range, grid_range + 1):
+                for dy in range(-grid_range, grid_range + 1):
+                    # Use the spatial index for direct lookup
+                    grid_pos = (x + dx, y + dy)
+                    if grid_pos in spatial_index:
+                        pos = spatial_index[grid_pos]
+                        grid_values.append(feature_values[pos])
+
+            # Take the maximum of the values found in the grid
+            smoothed_values[i] = max(grid_values) if grid_values else feature_values[i]
+
+        # Assign all values at once
+        df_smoothed[feature] = smoothed_values
+
+    return df_smoothed
