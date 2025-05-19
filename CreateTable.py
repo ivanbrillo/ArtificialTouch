@@ -117,8 +117,7 @@ def extract_features(data):
     hist_positive = hist[hist > 0]
     entropy = -np.sum(hist_positive * np.log2(hist_positive)) if len(hist_positive) > 0 else None
 
-    # Additional features
-    time_to_max = time_i[force_max_idx] - time_i[0]
+    # Force overshoot
     force_overshoot = (force_max - F_ss) / F_ss if F_ss > 0 else 0
 
     # Force relaxation
@@ -151,14 +150,11 @@ def extract_features(data):
     # Force peak-to-peak
     force_ptp = np.ptp(fi)
 
-    # Load duration calculation
-    load_duration = time_i[force_max_idx] - time_i[0]
-
     # Hjorth parameters
     activity = np.var(fi)
     mobility = np.sqrt(np.var(np.diff(fi)) / activity) if activity > 0 else None
 
-    # Teager-Kaiser Energy Operator (simplified)
+    # Teager-Kaiser Energy Operator
     tkeo_mean = None
     try:
         tkeo = fi[1:-1] ** 2 - fi[:-2] * fi[2:]
@@ -184,9 +180,8 @@ def extract_features(data):
 
     # Return all features in tuple format
     return (stiffness, tau, entropy, upstroke, downstroke, fi, pi, time_i, P_ss,
-            time_to_max, force_overshoot, force_relaxation,
-            force_rms, damping_coefficient, contact_area,
-            force_ptp, load_duration,
+            force_overshoot, force_relaxation,
+            force_rms, damping_coefficient, contact_area, force_ptp,
             activity, mobility,
             tkeo_mean, correlation_fp, peak_ratio, sample_entropy)
 
@@ -403,11 +398,8 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         return None
 
     (stiffness, tau, entropy, upstroke, downstroke, fi, pi, time_i, P_ss,
-     time_to_max, force_overshoot, force_relaxation,
-     force_rms, damping_coefficient, contact_area,
-     force_ptp, load_duration,
-     activity, mobility,
-     tkeo_mean, correlation_fp, peak_ratio, sample_entropy
+     force_overshoot, force_relaxation, force_rms, damping_coefficient, contact_area,
+     force_ptp, activity, mobility, tkeo_mean, correlation_fp, peak_ratio, sample_entropy
      ) = tuple
 
     label = get_label(posx, posy, centers, radii, materials)
@@ -422,14 +414,12 @@ def organize_df(df_input: DataFrame, centers, radii, materials) -> DataFrame | N
         "Upstroke": upstroke,
         "Downstroke": downstroke,
         "P_ss": P_ss,
-        "time_to_max": time_to_max,
         "force_overshoot": force_overshoot,
         "force_relaxation": force_relaxation,
         "force_rms": force_rms,
         "damping_coefficient": damping_coefficient,
         "contact_area": contact_area,
         "force_ptp": force_ptp,
-        "load_duration": load_duration,
         "activity": activity,
         "mobility": mobility,
         "tkeo_mean": tkeo_mean,
