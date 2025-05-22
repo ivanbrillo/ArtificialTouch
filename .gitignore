@@ -1,3 +1,16 @@
 /.venv/
 /.idea/
-/Dataset/
+/DamasconeB/
+/DamasconeC/
+/DamasconeA/
+/DamasconeA/data2
+
+/DamasconeA.pkl
+/DamasconeA2.pkl
+/DamasconeB.pkl
+/DamasconeC.pkl
+
+*.pyc
+*.pkl
+
+__pycache__/
