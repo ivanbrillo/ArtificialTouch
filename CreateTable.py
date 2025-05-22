@@ -10,8 +10,6 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
 from scipy.stats import skew, kurtosis
 
-from smoothingHelper import get_grid_bounds
-
 materials_label = {
     "Dragon Skin shore 20A": 1,
     "Dragon Skin shore 30A": 2,
@@ -249,87 +247,6 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
     return df
 
 
-def compute_spatial_and_surface_features(df):
-    """
-    Compute spatial, surface and LBP features across the 2D grid.
-    Only existing data points are used when computing local and global statistics.
-    """
-    x_min, y_min, (height, width) = get_grid_bounds(df)
-
-    features_list = ['Stiffness', 'Upstroke', 'Tau']
-    existing_points = set(zip(df['posx'].astype(int), df['posy'].astype(int)))
-
-    # Build raw grids (with NaNs for missing cells)
-    grids = {}
-    for feature in features_list:
-        grid = np.full((height, width), np.nan)
-        for idx, row in df.iterrows():
-            x = int(row['posx']) - x_min
-            y = int(row['posy']) - y_min
-            if 0 <= x < width and 0 <= y < height:
-                grid[y, x] = row[feature]
-        grids[feature] = grid
-
-    # Build position grid
-    position_grid = np.full((height, width), np.nan)
-    for _, row in df.iterrows():
-        x = int(row['posx']) - x_min
-        y = int(row['posy']) - y_min
-        if 0 <= x < width and 0 <= y < height:
-            position_grid[y, x] = row['P_ss']
-
-    # Global statistics computed only on measured cells
-    global_mean_stiffness = np.nanmean(grids['Stiffness'])
-    global_mean_position = np.nanmean(position_grid)
-    global_std_stiffness = np.nanstd(grids['Stiffness'])
-    global_std_position = np.nanstd(position_grid)
-    global_median_stiffness = np.nanmedian(grids['Stiffness'])
-    global_median_position = np.nanmedian(position_grid)
-
-    # Compute features only for existing points
-    for idx, row in df.iterrows():
-        orig_x, orig_y = int(row['posx']), int(row['posy'])
-        if (orig_x, orig_y) not in existing_points:
-            continue
-
-        x = orig_x - x_min
-        y = orig_y - y_min
-        if not (0 <= x < width and 0 <= y < height):
-            continue
-
-        # Define 3x3 patch boundaries
-        x_min, x_max = max(0, x - 1), min(width - 1, x + 1) + 1
-        y_min, y_max = max(0, y - 1), min(height - 1, y + 1) + 1
-
-        # Spatial: local means
-        for feature in features_list:
-            patch = grids[feature][y_min:y_max, x_min:x_max].flatten()
-            patch = patch[~np.isnan(patch)]
-            if patch.size > 0:
-                df.at[idx, f'local_mean_{feature}'] = patch.mean()
-
-        # Deviations from global mean & median, and z-scores
-        val_stiff = grids['Stiffness'][y, x]
-        val_pos = position_grid[y, x]
-
-        df.at[idx, 'stiffness_deviation_from_global'] = val_stiff - global_mean_stiffness
-        df.at[idx, 'position_deviation_from_global'] = val_pos - global_mean_position
-
-        df.at[idx, 'stiffness_deviation_from_global_median'] = val_stiff - global_median_stiffness
-        df.at[idx, 'position_deviation_from_global_median'] = val_pos - global_median_position
-
-        df.at[idx, 'stiffness_z_score'] = (
-            (val_stiff - global_mean_stiffness) / global_std_stiffness
-            if global_std_stiffness > 0 else np.nan
-        )
-        df.at[idx, 'position_z_score'] = (
-            (val_pos - global_mean_position) / global_std_position
-            if global_std_position > 0 else np.nan
-        )
-
-    return df
-
-
 def find_inclusions(json_data, symmetric=False, symm_v=False, angle=0, offset=(49, 49)) -> tuple:
     circles = json_data["Inclusions"]
 
@@ -471,5 +388,4 @@ def create_df(path: str = 'DamasconeA/Dataset/*.csv', symmetric=False, symm_v=Fa
     cleaned_df_list = [df.dropna(how='all') for df in df_list]
     non_empty_df_list = [df for df in cleaned_df_list if len(df) > 0]
     combined_df = pd.concat(non_empty_df_list, ignore_index=True)
-    combined_df = compute_spatial_and_surface_features(combined_df)
     return combined_df
