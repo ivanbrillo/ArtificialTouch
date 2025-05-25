@@ -2,8 +2,8 @@ import pandas as pd
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
-from featureExtractionHelper import filter_by_classes, compute_mi_dataframe, compute_wasserstein_metrics
-from featureExtractionPlotter import plot_mi_wdist, plot_wdist_class
+from featureSelectionHelper import filter_by_classes, compute_mi_dataframe, compute_wasserstein_metrics
+from featureSelectionPlotter import plot_mi_wdist, plot_wdist_class
 
 
 def select_features(mi_df, metrics_df, class_metrics, selected_classes,
