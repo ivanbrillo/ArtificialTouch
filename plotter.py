@@ -198,25 +198,26 @@ def plot_force_position(data):
 
     # Plot Force on left y-axis
     color1 = 'blue'
-    ax1.set_xlabel('Time (s)', fontsize=14)
-    ax1.set_ylabel('Force', color=color1, fontsize=14)
+    ax1.set_xlabel('Time [sec]', fontsize=12)
+    ax1.set_ylabel('Force [N]', color=color1, fontsize=12)
     line1 = ax1.plot(time, fi, linewidth=1,
                      label='Force', color=color1, alpha=0.8)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
 
     # Highlight segment around max force
-    start_idx = np.argmax(fi)
-    end_idx = start_idx + 2000
+    max_idx = np.argmax(fi)
+    start_idx = max_idx
+    end_idx =  max_idx + 2000
 
     # Plot highlighted force segment
     line1_h = ax1.plot(time[start_idx:end_idx], fi[start_idx:end_idx],
-                       linewidth=1.2, color='gold', alpha=0.9, label='Force while touching')
+                       linewidth=1.3, color='gold', alpha=0.9, label='Force while touching')
 
     # Create second y-axis for Position
     ax2 = ax1.twinx()
     color2 = 'red'
-    ax2.set_ylabel('Position', color=color2, fontsize=12)
+    ax2.set_ylabel('Position [m]', color=color2, fontsize=14)
     line2 = ax2.plot(time, pi, linewidth=1,
                      label='Position', color=color2, alpha=0.8)
     ax2.tick_params(axis='y', labelcolor=color2)
@@ -224,11 +225,12 @@ def plot_force_position(data):
     # Combined legend
     lines = line1 + line1_h + line2
     labels = [l.get_label() for l in lines]
-    legend = ax2.legend(lines, labels, fontsize=12, loc='upper right', framealpha=1)
+    legend = ax2.legend(lines, labels, fontsize=14, loc='upper right', framealpha=1)
     legend.set_zorder(5)
+    legend.get_frame().set_facecolor('white')
+    legend.get_frame().set_edgecolor('black')
 
-
-    plt.title('Force and Position in Time', fontsize=14, fontweight='bold', pad=10)
+    plt.title('Force and Position in Time', fontsize=16, fontweight='bold', pad=20)
 
     # Style
     sns.despine(ax=ax1, right=False)
