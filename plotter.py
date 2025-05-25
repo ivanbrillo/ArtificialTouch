@@ -1,3 +1,4 @@
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -130,3 +131,51 @@ def plot_smoothing_effect(validation_original, validation_smooth, train_original
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_prediction_map(X_data, y_true, y_pred, title="Prediction Map"):
+    # Create masks for correct and incorrect predictions
+    correct_mask = (y_true == y_pred)
+    incorrect_mask = ~correct_mask
+
+    # Generate a distinct color for each class
+    unique_classes = sorted(np.unique(np.concatenate([y_true, y_pred])))
+    num_classes = len(unique_classes)
+    cmap = cm.get_cmap('tab10', num_classes)
+    class_colors = {cls: cmap(i) for i, cls in enumerate(unique_classes)}
+
+    fig, ax = plt.subplots(figsize=(11, 11))
+
+    # Plot correctly predicted points
+    for cls in unique_classes:
+        mask = (y_true == cls) & correct_mask
+        ax.scatter(X_data.loc[mask, 'posx'],
+                   X_data.loc[mask, 'posy'],
+                   color=class_colors[cls],
+                   label=f'Class {cls} - Correct',
+                   marker='o',
+                   s=60,
+                   alpha=0.7)
+
+    # Plot incorrectly predicted points
+    for cls in unique_classes:
+        mask = (y_true == cls) & incorrect_mask
+        ax.scatter(X_data.loc[mask, 'posx'],
+                   X_data.loc[mask, 'posy'],
+                   color=class_colors[cls],
+                   label=f'Class {cls} - Incorrect',
+                   marker='x',
+                   s=80,
+                   alpha=0.8)
+
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("posx")
+    ax.set_ylabel("posy")
+    ax.legend(
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.05),
+        fontsize=9,
+        ncol=6,
+        frameon=False
+    )
+    plt.tight_layout()

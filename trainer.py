@@ -1,7 +1,13 @@
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
-from plotter import plot_confusion_matrix
 import numpy as np
+import pandas as pd
+import seaborn as sns
+from sklearn.base import clone
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+
+from TwoStageClassifier import TwoStageClassifier
+from plotter import plot_confusion_matrix
+
 
 def fit_and_evaluate_models(models, X_train, y_train, X_test, y_test):
     results = []
@@ -44,18 +50,36 @@ def fit_and_evaluate_models(models, X_train, y_train, X_test, y_test):
     return results
 
 
-# Plot comparison bar chart
-def plot_model_comparison(results):
-    import pandas as pd
-    import seaborn as sns
+def get_best_model(random_search, hard_spots_train_smoothed, hard_spots_validation_smoothed):
+    # Get the best parameters
+    best_params = random_search.best_params_
 
-    df = pd.DataFrame(results)
-    df_melted = df.melt(id_vars='Model', var_name='Metric', value_name='Score')
+    # Create base estimators
+    binary_model = clone(best_params['binary_classifier'])
+    multiclass_model = clone(best_params['multiclass_classifier'])
+    best_features = best_params['features'] + ["posx", "posy"]
 
-    plt.figure(figsize=(12, 6))
-    sns.barplot(data=df_melted, x='Model', y='Score', hue='Metric')
-    plt.title('Model Comparison')
-    plt.ylim(0, 1.05)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.show()
+    # Apply parameters to the two models
+    for param, value in best_params.items():
+        if param.startswith('binary_classifier__'):
+            param_name = param.replace('binary_classifier__', '')
+            setattr(binary_model, param_name, value)
+        if param.startswith('multiclass_classifier__'):
+            param_name = param.replace('multiclass_classifier__', '')
+            setattr(multiclass_model, param_name, value)
+
+    # Create classifier with the configured models
+    best_clf = TwoStageClassifier(
+        binary_classifier=binary_model,
+        multiclass_classifier=multiclass_model,
+        features=best_params['features'],
+        train_smoothed=[hard_spots_train_smoothed, hard_spots_validation_smoothed]
+    )
+
+    return best_clf, best_features
+
+
+def print_metrics(y_true, y_pred, label="Set"):
+    print(f"\n=== {label} Metrics ===")
+    print(f"Accuracy:  {accuracy_score(y_true, y_pred):.4f}")
+    print(f"F1 Score (macro):  {f1_score(y_true, y_pred, average='macro'):.4f}")
