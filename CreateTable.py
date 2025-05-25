@@ -35,7 +35,7 @@ def extract_features(data):
     time = data['CPXEts'][data['isArrived_Festo'] == 1].to_numpy()
 
     fz_touch = (data['Fz_s'][data['isTouching_SMAC'] == 1]).to_numpy()
-    pz_touch = (data['posz_s'][data['isTouching_SMAC'] == 1]).to_numpy()
+    pz_touch = (data['posz_s'][data['isTouching_SMAC'] == 1] / 1000).to_numpy()
     time_touch = data['CPXEts'][data['isTouching_SMAC'] == 1].to_numpy()
 
     if len(time) == 0:
@@ -202,17 +202,11 @@ def extract_curve_features(position, force):
         y_load = force[:peak_idx + 1]
 
         try:
-            cubic_fit = np.polyfit(x_load, y_load, 3)
-            features['cubic_coefficient'] = cubic_fit[0]
-        except Exception:
-            features['cubic_coefficient'] = np.nan
-        try:
             quartic_fit = np.polyfit(x_load, y_load, 4)
             features['quartic_coefficient'] = quartic_fit[0]
         except Exception:
             features['quartic_coefficient'] = np.nan
     else:
-        features['cubic_coefficient'] = np.nan
         features['quartic_coefficient'] = np.nan
 
     return features
@@ -224,7 +218,7 @@ def compute_hysteresis_features_for_df(df, force_column='Fi', pos_column='Pi', t
     compute the hysteresis features using extract_curve_features() and add them as new columns.
     """
     # List of hysteresis features
-    hysteresis_features = ['loading_skewness', 'loading_kurtosis', 'cubic_coefficient', 'quartic_coefficient']
+    hysteresis_features = ['loading_skewness', 'loading_kurtosis', 'quartic_coefficient']
 
     # Initialize the hysteresis feature columns if they don't exist
     for feat in hysteresis_features:
