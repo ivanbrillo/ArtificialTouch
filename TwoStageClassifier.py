@@ -113,38 +113,39 @@ class TwoStageClassifier(BaseEstimator, ClassifierMixin):
         """
         Predict class probabilities for samples in X.
         """
-        # Get binary probabilities using the binary features
+        # Extract features for binary classifier
         X_binary = X[self.features] if self.features else X
         binary_proba = self.binary_model_.predict_proba(X_binary)
+        binary_pred = self.binary_model_.predict(X_binary)
 
-        # Get probability of being in class 0 vs non-zero
-        prob_zero = binary_proba[:, 0]  # prob of being in class 0
-        prob_nonzero = binary_proba[:, 1]  # prob of being in non-zero classes
+        # Masks for binary prediction
+        nonzero_mask = binary_pred > 0
+        zero_mask = ~nonzero_mask
 
-        # Initialize final probability matrix with zeros
-        final_proba = np.zeros((X.shape[0], len(self.classes_)))
+        # Probabilities from binary classifier
+        prob_zero = binary_proba[:, 0]  # P(class = 0)
+        prob_nonzero = binary_proba[:, 1]  # P(class ≠ 0)
 
-        # Set the probability for class 0
-        final_proba[:, 0] = prob_zero
+        # Initialize final probabilities
+        n_classes = len(self.classes_)
+        final_proba = np.zeros((X.shape[0], n_classes))
+        final_proba[:, 0] = prob_zero  # Class 0 gets its probability
 
-        # Apply smoothing if enabled
-        X_multi = X.copy()
-        if self.apply_smoothing:
-            X_multi = grid_max_smooth(
-                X_multi,
-                features_to_smooth=self.features,
-            )
+        # For zero_mask rows, distribute prob_nonzero uniformly across other classes
+        if zero_mask.any():
+            uniform = np.full(n_classes - 1, 1.0 / (n_classes - 1))
+            final_proba[zero_mask, 1:] = prob_nonzero[zero_mask, None] * uniform
 
-        # Extract features for multiclass classifier
-        X_multi_features = X_multi[self.features] if self.features else X_multi
+        # For nonzero_mask rows, apply multiclass classifier
+        if nonzero_mask.any():
+            X_multi = X[nonzero_mask]
+            if self.apply_smoothing:
+                X_multi = grid_max_smooth(X_multi, features_to_smooth=self.features)
 
-        # Get multiclass probabilities
-        multiclass_proba = self.multiclass_model_.predict_proba(X_multi_features)
+            X_multi = X_multi[self.features] if self.features else X_multi
+            multiclass_proba = self.multiclass_model_.predict_proba(X_multi)
 
-        # Scale the multiclass probabilities by the probability of being non-zero
-        # For each non-zero class (1, 2, 3, etc.)
-        for i in range(multiclass_proba.shape[1]):
             # The probability is: P(non-zero) * P(specific class | non-zero)
-            final_proba[:, i + 1] = prob_nonzero * multiclass_proba[:, i]
+            final_proba[nonzero_mask, 1:] = prob_nonzero[nonzero_mask, None] * multiclass_proba
 
         return final_proba

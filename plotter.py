@@ -238,3 +238,44 @@ def plot_force_position(data):
     plt.tight_layout()
     plt.show()
     return fig
+
+def plot_classwise_probability_distributions(clf, X, y, class_labels=None, feature_names=None):
+    """
+    Plot the distribution of predicted probabilities for each class.
+
+    """
+    # Select only the features the model was trained on
+    X_input = X[feature_names] if feature_names is not None else X
+
+    # Get predicted probabilities for all classes
+    y_proba = clf.predict_proba(X_input)
+
+    # Determine number of classes
+    n_classes = y_proba.shape[1]
+    classes = np.arange(n_classes)
+
+    # Default labels
+    if class_labels is None:
+        class_labels = [f"Class {c}" for c in classes]
+
+    for cls in classes:
+        plt.figure(figsize=(7, 5))
+
+        # Mask for samples truly belonging to class `cls`
+        is_true_class = (y == cls)
+
+        # KDE plots
+        sns.kdeplot(y_proba[is_true_class, cls], label=f"True {class_labels[cls]}", linewidth=2)
+        sns.kdeplot(y_proba[~is_true_class, cls], label=f"Not {class_labels[cls]}", linewidth=2)
+
+        # Decision threshold
+        plt.axvline(0.5, color='red', linestyle='--', label='Threshold 0.5')
+
+        plt.title(f"Predicted Probability Distribution - {class_labels[cls]}")
+        plt.xlabel("Predicted Probability")
+        plt.ylabel("Density")
+        plt.xlim(0, 1)
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
