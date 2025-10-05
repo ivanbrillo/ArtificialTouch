@@ -1,7 +1,7 @@
 import glob
 import json
 
-import antropy
+#import antropy
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
@@ -24,8 +24,8 @@ def extract_features(data):
     data['Fz_s'] = gaussian_filter1d(data['forceZ'], sigma=2)
     data['posz_s'] = gaussian_filter1d(data['posz'], sigma=2)
     # Force normalization
-    offset = np.mean(data['Fz_s'][data['isArrived_Festo'] == 1])
-    data['Fz_s'] = (data['Fz_s'] - offset) / np.mean(data['Fz_s'][data['isTouching_SMAC'] == 1][-30:])
+    #offset = np.mean(data['Fz_s'][data['isArrived_Festo'] == 1])
+    #data['Fz_s'] = (data['Fz_s'] - offset) / np.mean(data['Fz_s'][data['isTouching_SMAC'] == 1][-30:])
     # Position normalization
     offset_p = np.mean(data['posz_s'][data['isArrived_Festo'] == 1])
     data['posz_s'] = (data['posz_s'] - offset_p) / np.mean(data['posz_s'][data['isTouching_SMAC'] == 1][-30:])
